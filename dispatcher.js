@@ -217,6 +217,15 @@
         const hasPickup = pickupLat != null && pickupLng != null;
         const seatsRequired = Number(ride?.seatsRequired || 1);
 
+        // Pre-compute route-based detours for every driver so we can both
+        // hard-filter (detour must fit the budget) and feed the "distance"
+        // score component with a routing-aware value.
+        const routed = (window.routeDispatcher && hasPickup)
+            ? window.routeDispatcher.findBestDriver(drivers || [], ride, allRides || [])
+            : [];
+        const routeByDriverId = new Map();
+        for (const r of routed) routeByDriverId.set(String(r.driver.id), r);
+
         const candidates = [];
         for (const driver of drivers || []) {
             if (!driver || driver.isApproved !== true) continue;
@@ -236,10 +245,29 @@
             const conflict = hasTimeConflict(driver.id, ride, allRides);
             if (conflict) continue;
 
+            // Reject drivers whose best insertion busts the detour budget —
+            // the ride simply isn't on their way.
+            const routeInfo = routeByDriverId.get(String(driver.id)) || null;
+            if (routeInfo && routeInfo.feasible === false
+                && (routeInfo.reason === 'detour-exceeded' || routeInfo.reason === 'stops-cap')) {
+                continue;
+            }
+
             const workload = countWorkloadToday(driver.id, allRides);
 
+            // "distance" is now interpreted as routing-aware: we score the
+            // detour the new ride would add to the driver's existing route.
+            // For idle drivers with no active rides, the route is just
+            // [current] and detour collapses to haversine(current, P)+haversine(P, D),
+            // so the score stays sensible.
+            const distanceComponent = routeInfo && Number.isFinite(routeInfo.detour)
+                ? (routeInfo.budget > 0
+                    ? Math.max(0, 1 - routeInfo.detour / routeInfo.budget)
+                    : 1)
+                : distanceScore(distKm);
+
             const components = {
-                distance:  distanceScore(distKm),
+                distance:  distanceComponent,
                 locality:  localityScore(driver, ride),
                 rating:    ratingFromDriver(driver),
                 freshness: freshnessScore(loc.updatedAt),
@@ -259,6 +287,7 @@
                 workload,
                 weights,
                 location: loc,
+                route: routeInfo,
             });
         }
 
@@ -276,6 +305,9 @@
         const chips = [];
         if (candidate.distKm != null) chips.push(`${candidate.distKm.toFixed(1)} km`);
         else chips.push('no gps');
+        if (candidate.route && Number.isFinite(candidate.route.detour)) {
+            chips.push(`+${candidate.route.detour.toFixed(1)} km detour`);
+        }
         const locPct = Math.round(candidate.components.locality * 100);
         if (locPct >= 100) chips.push('same baladia');
         else if (locPct >= 50) chips.push('same wilaya');
