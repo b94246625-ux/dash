@@ -1,42 +1,25 @@
-// this is newwer version
+/* ================================================================
+   Taxi for Kids — Admin Dashboard
+   Main application logic (vanilla JS).
+   Depends on: i18n.js, dispatcher.js, fleet-map.js, driver-normalize.js
+   ================================================================ */
 
-// Data arrays
+// ---------------- Data state ----------------
 let drivers = [];
 let rides = [];
 let children = [];
+let pendingTripHistoryReq = 0; // race-guard for async history fetches
 
-// Sample data removed - login required to access real Firebase data
 const PAGE_TITLES = Object.freeze({
-    dashboard: 'Dashboard',
-    drivers: 'Drivers',
-    rides: 'Rides',
-    children: 'Children',
-    settings: 'Settings'
+    dashboard: 'nav.dashboard',
+    drivers:   'nav.drivers',
+    rides:     'nav.rides',
+    dispatch:  'nav.dispatch',
+    children:  'nav.children',
+    settings:  'nav.settings',
 });
 const DEFAULT_PAGE = 'dashboard';
 const LIVE_DATA_COLLECTIONS = Object.freeze(['drivers', 'trip_requests', 'parents']);
-
-// Initialization and UI Logic
-document.addEventListener('DOMContentLoaded', async () => {
-    initializeNavigation();
-    initializeTheme();
-    setupEventListeners();
-    
-    // Show login modal initially
-    const loginModal = document.getElementById('loginModal');
-    const pageContent = document.getElementById('pageContent');
-    if (loginModal) loginModal.classList.add('active');
-    if (pageContent) pageContent.style.display = 'none';
-    
-    await initFirebase();
-});
-
-function loadDashboard() {
-    const hashPage = window.location.hash.replace('#', '');
-    const initialPage = normalizePage(hashPage || DEFAULT_PAGE);
-    switchPage(initialPage, { refreshData: true, updateHash: Boolean(hashPage) });
-}
-
 
 let firestore = null;
 let currentUser = null;
@@ -49,7 +32,9 @@ let hasQueuedFirestoreRefresh = false;
 let driverTableFilter = 'all';
 let driverSearchQuery = '';
 let rideSearchQuery = '';
+let rideTableFilter = 'all';
 
+// ---------------- Utility helpers ----------------
 function escapeHtml(text) {
     return String(text ?? '')
         .replace(/&/g, '&amp;')
@@ -62,6 +47,87 @@ function escapeAttr(text) {
     return escapeHtml(text).replace(/'/g, '&#39;');
 }
 
+function t(key, fallback) {
+    return window.i18n ? window.i18n.t(key, fallback) : (fallback ?? key);
+}
+
+function initials(name) {
+    return String(name || '?')
+        .trim()
+        .split(/\s+/)
+        .slice(0, 2)
+        .map(s => s.charAt(0).toUpperCase())
+        .join('') || '?';
+}
+
+function formatDate(value) {
+    if (!value) return t('common.notAvailable', 'N/A');
+    const d = value instanceof Date ? value : new Date(value);
+    if (isNaN(d.getTime())) return t('common.notAvailable', 'N/A');
+    const lang = window.i18n ? window.i18n.getLang() : 'en';
+    try {
+        return d.toLocaleDateString(lang === 'ar' ? 'ar-DZ' : 'en-US', {
+            year: 'numeric', month: 'short', day: 'numeric',
+        });
+    } catch {
+        return d.toISOString().slice(0, 10);
+    }
+}
+
+function formatDateTime(value) {
+    if (!value) return t('common.notAvailable', 'N/A');
+    const d = value instanceof Date ? value : new Date(value);
+    if (isNaN(d.getTime())) return t('common.notAvailable', 'N/A');
+    const lang = window.i18n ? window.i18n.getLang() : 'en';
+    try {
+        return d.toLocaleString(lang === 'ar' ? 'ar-DZ' : 'en-US');
+    } catch {
+        return d.toISOString();
+    }
+}
+
+function calculateAge(dob) {
+    if (!dob) return t('common.notAvailable', 'N/A');
+    const d = new Date(dob);
+    if (isNaN(d.getTime())) return t('common.notAvailable', 'N/A');
+    const now = new Date();
+    let age = now.getFullYear() - d.getFullYear();
+    const m = now.getMonth() - d.getMonth();
+    if (m < 0 || (m === 0 && now.getDate() < d.getDate())) age--;
+    return age >= 0 ? age : t('common.notAvailable', 'N/A');
+}
+
+function numFromCoord(v) {
+    if (v == null || v === '') return null;
+    const raw = typeof v === 'string' ? v.trim().replace(',', '.') : v;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+}
+
+function normalizePage(page) {
+    return PAGE_TITLES[page] ? page : DEFAULT_PAGE;
+}
+
+// ---------------- Toasts ----------------
+function showToast({ title = '', body = '', variant = 'info', timeout = 4000 } = {}) {
+    const stack = document.getElementById('toastStack');
+    if (!stack) return;
+    const toast = document.createElement('div');
+    toast.className = `toast ${variant}`;
+    toast.innerHTML = `
+        <div style="flex:1; min-width:0;">
+            ${title ? `<div class="title">${escapeHtml(title)}</div>` : ''}
+            ${body  ? `<div class="body">${escapeHtml(body)}</div>`   : ''}
+        </div>
+        <button type="button" class="close" aria-label="Close"><i class="fas fa-times"></i></button>
+    `;
+    stack.appendChild(toast);
+    const remove = () => toast.remove();
+    toast.querySelector('.close').addEventListener('click', remove);
+    if (timeout > 0) setTimeout(remove, timeout);
+}
+
+// ---------------- Ride helpers ----------------
 function getRideChildName(ride) {
     if (!ride || typeof ride !== 'object') return 'Unknown Child';
     if (ride.childName && ride.childName !== ride.childId && ride.childName !== 'Unknown Child') {
@@ -86,39 +152,6 @@ function getEffectiveRideStatus(ride) {
     return raw || 'pending';
 }
 
-function collectAssignedDriverIdsFromTripRequest(tripRequest) {
-    const ids = new Set();
-    const addId = (value) => {
-        const id = String(value ?? '').trim();
-        if (id) ids.add(id);
-    };
-    const addFromTrip = (trip) => {
-        if (!trip || typeof trip !== 'object') return;
-        addId(trip.assignedDriverId || trip.driverId);
-    };
-    const addFromScheduleArray = (items) => {
-        if (!Array.isArray(items)) return;
-        items.forEach(day => {
-            if (!day || typeof day !== 'object' || !Array.isArray(day.trips)) return;
-            day.trips.forEach(addFromTrip);
-        });
-    };
-
-    if (!tripRequest || typeof tripRequest !== 'object') return [];
-
-    if (Array.isArray(tripRequest.trips)) {
-        tripRequest.trips.forEach(addFromTrip);
-    }
-    addFromScheduleArray(tripRequest.schedule);
-    addFromScheduleArray(tripRequest.days);
-
-    if (tripRequest.activeTrip && typeof tripRequest.activeTrip === 'object') {
-        addId(tripRequest.activeTrip.assignedDriverId || tripRequest.activeTrip.driverId);
-    }
-
-    return Array.from(ids);
-}
-
 function isRideAssigned(ride) {
     const assignedId = getRideAssignedDriverId(ride);
     if (assignedId) return true;
@@ -127,47 +160,15 @@ function isRideAssigned(ride) {
 }
 
 function getRideParentContact(ride) {
-    if (!ride || typeof ride !== 'object') {
-        return { name: 'Unknown Parent', phone: 'N/A' };
+    if (!ride || typeof ride !== 'object') return { name: 'Unknown Parent', phone: 'N/A' };
+    if (ride.parentName || ride.parentPhone) {
+        return { name: ride.parentName || 'Unknown Parent', phone: ride.parentPhone || 'N/A' };
     }
     if (ride.childId) {
         const child = children.find(c => c.id === ride.childId);
-        if (child) {
-            return {
-                name: child.parent || 'Unknown Parent',
-                phone: child.parentPhone || 'N/A'
-            };
-        }
+        if (child) return { name: child.parent || 'Unknown Parent', phone: child.parentPhone || 'N/A' };
     }
-    return {
-        name: ride.parent?.fullName || ride.parent?.name || 'Unknown Parent',
-        phone: ride.parent?.phone || 'N/A'
-    };
-}
-
-function makeTripRideKey(parentId, childId, day, tripIndex) {
-    if (tripIndex == null || tripIndex === '') return '';
-    const parsedIndex = Number(tripIndex);
-    if (!Number.isInteger(parsedIndex) || parsedIndex < 0) return '';
-    const parent = String(parentId ?? '').trim();
-    const child = String(childId ?? '').trim();
-    const dayValue = String(day ?? '').trim();
-    if (!parent || !child || !dayValue) return '';
-    return `${parent}_${child}_${dayValue}_${parsedIndex}`;
-}
-
-function getTripRequestTimeValue(tripRequest) {
-    if (!tripRequest || typeof tripRequest !== 'object') return 0;
-    const candidates = [tripRequest.acceptedAt, tripRequest.createdAt, tripRequest.updatedAt];
-    let newest = 0;
-    for (const value of candidates) {
-        if (!value) continue;
-        const parsed = Date.parse(value);
-        if (Number.isFinite(parsed) && parsed > newest) {
-            newest = parsed;
-        }
-    }
-    return newest;
+    return { name: 'Unknown Parent', phone: 'N/A' };
 }
 
 function driverStatusClass(status) {
@@ -183,80 +184,27 @@ function rideStatusClass(status) {
     return 'pending';
 }
 
-function clearLiveDataSubscriptions() {
-    liveDataUnsubscribers.forEach(unsubscribe => {
-        try {
-            if (typeof unsubscribe === 'function') unsubscribe();
-        } catch (err) {
-            console.warn('Unable to unsubscribe from live data listener:', err);
-        }
-    });
-    liveDataUnsubscribers = [];
+// ---------------- Initialization ----------------
+document.addEventListener('DOMContentLoaded', async () => {
+    initializeNavigation();
+    initializeTheme();
+    setupEventListeners();
+    setupDispatchSettingsUI();
 
-    if (liveRefreshTimer) {
-        clearTimeout(liveRefreshTimer);
-        liveRefreshTimer = null;
-    }
-    isFetchingFirestoreData = false;
-    hasQueuedFirestoreRefresh = false;
-}
+    // i18n is applied by i18n.js
 
-function scheduleFirestoreRefresh(delayMs = 160) {
-    if (!isAdmin || !firestore) return;
-    if (liveRefreshTimer) clearTimeout(liveRefreshTimer);
-    liveRefreshTimer = setTimeout(() => {
-        liveRefreshTimer = null;
-        refreshDataFromFirestore();
-    }, delayMs);
-}
+    const loginModal = document.getElementById('loginModal');
+    const pageContent = document.getElementById('pageContent');
+    if (loginModal) loginModal.classList.add('active');
+    if (pageContent) pageContent.style.display = 'none';
 
-async function refreshDataFromFirestore() {
-    if (!isAdmin || !firestore) return;
-    if (isFetchingFirestoreData) {
-        hasQueuedFirestoreRefresh = true;
-        return;
-    }
-    isFetchingFirestoreData = true;
-    try {
-        await fetchDataFromFirestore();
-    } finally {
-        isFetchingFirestoreData = false;
-        if (hasQueuedFirestoreRefresh) {
-            hasQueuedFirestoreRefresh = false;
-            scheduleFirestoreRefresh(0);
-        }
-    }
-}
+    // Initialize map early so it lays out even before data arrives
+    if (window.fleetMap) window.fleetMap.initFleetMap();
 
-function initializeLiveDataSubscriptions() {
-    if (!isAdmin || !firestore || typeof firestore.collection !== 'function') return;
-    clearLiveDataSubscriptions();
+    await initFirebase();
+});
 
-    LIVE_DATA_COLLECTIONS.forEach(collectionName => {
-        const unsubscribe = firestore.collection(collectionName).onSnapshot(
-            () => {
-                scheduleFirestoreRefresh();
-            },
-            (err) => {
-                console.error(`Live listener failed for "${collectionName}":`, err);
-            }
-        );
-        liveDataUnsubscribers.push(unsubscribe);
-    });
-
-    if (typeof firestore.collectionGroup === 'function') {
-        const childrenUnsubscribe = firestore.collectionGroup('children').onSnapshot(
-            () => {
-                scheduleFirestoreRefresh();
-            },
-            (err) => {
-                console.error('Live listener failed for "children" collection group:', err);
-            }
-        );
-        liveDataUnsubscribers.push(childrenUnsubscribe);
-    }
-}
-
+// ---------------- Firebase init ----------------
 async function initFirebase() {
     if (typeof firebase === 'undefined' || !firebase || !firebase.app) {
         useSampleData();
@@ -267,855 +215,1008 @@ async function initFirebase() {
         useSampleData();
         return;
     }
-
     try {
         if (!firebase.apps || !firebase.apps.length) {
             firebase.initializeApp(window.FIREBASE_CONFIG);
         }
         firestore = firebase.firestore();
-
-        if (firebase.auth) {
-            firebase.auth().onAuthStateChanged(async (user) => {
-                currentUser = user;
-                updateAuthUI(user);
-                
-                if (user) {
-                    try {
-                        const idTokenResult = await user.getIdTokenResult();
-                        // Check if the custom claim 'admin' is true
-                        // Change this block in script.js:
-                        if ((idTokenResult?.claims?.admin === true) || user.uid === 'XNSrFLevivdIrzTg4exZQxiK3162') {
-                           isAdmin = true;
-                           initializeLiveDataSubscriptions();
-                           await refreshDataFromFirestore();
-                        } else {
-                           isAdmin = false;
-                           clearLiveDataSubscriptions();
-                           alert("You are logged in, but you do not have Admin privileges.");
-                           useSampleData();
-                        }
-
-                    } catch (e) {
-                        isAdmin = false;
-                        console.error('Admin check failed:', e);
-                        clearLiveDataSubscriptions();
-                        useSampleData();
-                    }
-                } else {
-                    isAdmin = false;
-                    clearLiveDataSubscriptions();
-                    useSampleData();
-                }
-            });
-        }
+        firebase.auth().onAuthStateChanged(async (user) => {
+            currentUser = user || null;
+            if (user) {
+                const tokenResult = await user.getIdTokenResult(true).catch(() => null);
+                isAdmin = !!tokenResult?.claims?.admin;
+                onLoggedIn(user);
+            } else {
+                isAdmin = false;
+                onLoggedOut();
+            }
+        });
     } catch (err) {
-        isAdmin = false;
-        console.error('Firebase initialization failed:', err);
+        console.error('Firebase init failed:', err);
         useSampleData();
     }
 }
 
-function updateAuthUI(user) {
-    const signInBtn = document.getElementById('signInBtn');
-    const logoutTopBtn = document.getElementById('logoutTopBtn');
+function onLoggedIn(user) {
     const loginModal = document.getElementById('loginModal');
     const pageContent = document.getElementById('pageContent');
-    
-    if (user) {
-        signInBtn.textContent = user.email;
-        signInBtn.style.backgroundColor = 'var(--success)';
-        signInBtn.disabled = true;
-        logoutTopBtn?.removeAttribute('hidden');
-        // Hide login modal and show dashboard
-        if (loginModal) loginModal.classList.remove('active');
-        if (pageContent) pageContent.style.display = '';
-        // Load dashboard when user logs in
-        loadDashboard();
-    } else {
-        signInBtn.textContent = 'Sign In';
-        signInBtn.style.backgroundColor = 'var(--primary)';
-        signInBtn.disabled = false;
-        logoutTopBtn?.setAttribute('hidden', '');
-        // Show login modal and hide dashboard
-        if (loginModal) loginModal.classList.add('active');
-        if (pageContent) pageContent.style.display = 'none';
-    }
+    if (loginModal) loginModal.classList.remove('active');
+    if (pageContent) pageContent.style.display = '';
+
+    const nameEl = document.getElementById('sidebarUserName');
+    const roleEl = document.getElementById('sidebarUserRole');
+    if (nameEl) nameEl.textContent = user.displayName || user.email || 'Admin';
+    if (roleEl) roleEl.textContent = isAdmin ? 'Administrator' : 'Signed-in user';
+
+    document.getElementById('signInBtn')?.setAttribute('hidden', '');
+    document.getElementById('emailLoginBtn')?.setAttribute('hidden', '');
+    document.getElementById('logoutTopBtn')?.removeAttribute('hidden');
+    document.getElementById('logoutBtn')?.removeAttribute('hidden');
+
+    refreshDataFromFirestore().then(() => loadDashboard());
+    initializeLiveDataSubscriptions();
+
+    const banner = document.getElementById('liveBanner');
+    if (banner) banner.hidden = false;
 }
 
-function performLogout() {
-    if (!confirm('Are you sure you want to logout?')) return;
+function onLoggedOut() {
     clearLiveDataSubscriptions();
-    if (typeof firebase !== 'undefined' && firebase.auth) {
-        firebase.auth().signOut();
-    }
-}
-function calculateAge(dob) {
-    if (!dob) return 'N/A';
-    
-    let birthDate;
-    // Check if it is a Firestore Timestamp object
-    if (typeof dob.toDate === 'function') {
-        birthDate = dob.toDate();
-    } else {
-        // Otherwise, assume it is a standard date string like "YYYY-MM-DD"
-        birthDate = new Date(dob);
-    }
-
-    // If the date is invalid, return N/A
-    if (isNaN(birthDate.getTime())) return 'N/A';
-
-    const today = new Date();
-    let age = today.getFullYear() - birthDate.getFullYear();
-    const monthDifference = today.getMonth() - birthDate.getMonth();
-    
-    // If the child hasn't had their birthday yet this year, subtract 1
-    if (monthDifference < 0 || (monthDifference === 0 && today.getDate() < birthDate.getDate())) {
-        age--;
-    }
-    
-    return age;
-}
-async function fetchDataFromFirestore() {
-    try {
-        // 1. Fetch Drivers
-        const driversSnap = await firestore.collection('drivers').get();
-        drivers = driversSnap.docs.map(doc => normalizeDriverFromFirestore(doc.id, doc.data()));
-     
-        const driverMap = {}; // This will hold our ID to Name links
-        
-        driversSnap.forEach(doc => {
-            const driverData = doc.data();
-            // Assuming the driver's name is saved as 'name' or 'fullName'
-            driverMap[doc.id] = driverData.name || driverData.fullName || 'Unknown Driver';
-        });
-
-        // 2. Now fetch Trip Requests and flatten schedule into individual rides
-// 2. جلب الرحلات من schedules subcollection
-rides = [];
-const parentsForRidesSnap = await firestore.collection('parents').get();
-
-for (const parentDoc of parentsForRidesSnap.docs) {
-    const parentId = parentDoc.id;
-    const parentData = parentDoc.data();
-    const parentName = parentData.fullName || parentData.name || 'Unknown Parent';
-    const parentPhone =
-        parentData.phone ||
-        parentData.phoneNumber ||
-        parentData.mobile ||
-        parentData.whatsapp ||
-        'N/A';
-    
-    const childrenForRidesSnap = await parentDoc.ref.collection('children').get();
-
-    for (const childDoc of childrenForRidesSnap.docs) {
-        const childId = childDoc.id;
-        const childData = childDoc.data();
-        const childName = childData.firstName || 'Unknown Child';
-        const childAge = calculateAge(childData.dateOfBirth);
-        const childPhotoUrl = childData.photoUrl || null;
-        
-        const schedulesSnap = await childDoc.ref.collection('schedules').get();
-
-        for (const scheduleDoc of schedulesSnap.docs) {
-            const scheduleData = scheduleDoc.data();
-            const day = scheduleData.day || scheduleDoc.id;
-            const trips = scheduleData.trips || [];
-
-            trips.forEach((trip, index) => {
-                const tripAssignedDriverId = String(
-                    trip.assignedDriverId || trip.driverId || ''
-                ).trim();
-                const rawStatus = String(trip.status || 'pending').trim().toLowerCase();
-                const driverName = tripAssignedDriverId
-                    ? driverMap[tripAssignedDriverId] || 'Unknown Driver'
-                    : 'Pending Driver';
-
-                // pickup
-                const pickupObj = trip.pickupLocation || trip.pickup || {};
-                const dropoffObj = trip.dropoffLocation || trip.dropoff || {};
-                const pickupDisplay = formatPlaceLabel(pickupObj, 'Unknown pickup');
-                const dropoffDisplay = formatPlaceLabel(dropoffObj, 'Unknown dropoff');
-
-               rides.push({
-    __docId: scheduleDoc.id,
-    id: `${parentId}-${childId}-${day}-${index}`,
-    scheduleField: 'trips',
-    dayIndex: -1,
-    tripIndex: index,
-    childName: childName,
-    childAge: childAge,
-    childPhotoUrl: childPhotoUrl,
-    parentName: parentName,
-    parentPhone: parentPhone,
-    driverName,
-    pickup: pickupDisplay,
-    dropoff: dropoffDisplay,
-    pickupLat: numFromCoord(pickupObj.lat),
-    pickupLng: numFromCoord(pickupObj.lng),
-    pickupLocationFull: pickupObj,
-    dropoffLocationFull: dropoffObj,
-    idTrip: trip.idTrip || '',
-    tripType: trip.type || 'other',
-    fromLabel: trip.from || '',
-    toLabel: trip.to || '',
-    isPaused: trip.isPaused || false,
-    isScheduleActive: scheduleData.isActive !== false,
-    childId: childId,
-    parentId: parentId,
-    driverId: tripAssignedDriverId,
-    time: trip.time || 'N/A',
-    day: day,
-    status: tripAssignedDriverId && rawStatus === 'pending' ? 'accepted'
-          : (rawStatus || 'pending')
-});
-            });
-        }
-    }
-}
-// 3. Fetch Children (Looping through parents to get their children)
-        const parentsSnap = await firestore.collection('parents').get();
-        let fetchedChildren = [];
-        
-        for (const parentDoc of parentsSnap.docs) {
-            const parentData = parentDoc.data();
-            // Get parent's name to display in the table
-            const parentName = parentData.fullName || parentData.name || 'Unknown Parent';
-            const parentPhone =
-                parentData.phone ||
-                parentData.phoneNumber ||
-                parentData.mobile ||
-                parentData.whatsapp ||
-                'N/A';
-            
-            // Get the children subcollection for this specific parent
-            const childrenSnap = await parentDoc.ref.collection('children').get();
-            
-            childrenSnap.forEach(childDoc => {
-                const childData = childDoc.data();
-                fetchedChildren.push({
-                    __docId: childDoc.id,
-                    id: childDoc.id,
-                    // Pulling the child's actual name
-                    name: childData.firstName || 'Unknown Child',
-                    // Assuming you have an age field, otherwise defaults to N/A
-                    age: calculateAge(childData.dateOfBirth),
-                    parent: parentName,
-                    parentPhone: parentPhone,
-                    // If you save the assigned driver ID to the child, it will show here
-                    driver: childData.assignedDriverId || 'None', 
-                    status: 'N/A'
-                });
-            });
-        }
-        // Save the fetched children to your global array
-        children = fetchedChildren;
-
-        // Fetch trip_requests and map them to an exact trip key (parent + child + day + tripIndex).
-        // This prevents a single assignment from being copied to all trips of the same day.
-        const tripRequestsSnap = await firestore.collection('trip_requests').get();
-        const tripRequestsByTripKey = new Map();
-        const legacyTripRequestsByDay = new Map();
-        const ridesCountByDay = new Map();
-
-        rides.forEach(ride => {
-            const dayKey = `${ride.parentId}_${ride.childId}_${ride.day}`;
-            ridesCountByDay.set(dayKey, (ridesCountByDay.get(dayKey) || 0) + 1);
-        });
-
-        tripRequestsSnap.forEach(doc => {
-            const data = doc.data();
-            const dayKey = `${data.parentId}_${data.childId}_${data.day}`;
-            const tripKey = makeTripRideKey(data.parentId, data.childId, data.day, data.tripIndex);
-
-            if (tripKey) {
-                const existing = tripRequestsByTripKey.get(tripKey);
-                if (!existing || getTripRequestTimeValue(data) >= getTripRequestTimeValue(existing)) {
-                    tripRequestsByTripKey.set(tripKey, data);
-                }
-                return;
-            }
-
-            if (!legacyTripRequestsByDay.has(dayKey)) {
-                legacyTripRequestsByDay.set(dayKey, []);
-            }
-            legacyTripRequestsByDay.get(dayKey).push(data);
-        });
-
-        // Update rides with trip_requests data only when it is unambiguous.
-        rides.forEach(ride => {
-            const tripKey = makeTripRideKey(ride.parentId, ride.childId, ride.day, ride.tripIndex);
-            let tripReq = tripKey ? tripRequestsByTripKey.get(tripKey) : null;
-
-            if (!tripReq) {
-                const dayKey = `${ride.parentId}_${ride.childId}_${ride.day}`;
-                const dayRequests = legacyTripRequestsByDay.get(dayKey) || [];
-                if (dayRequests.length === 1 && ridesCountByDay.get(dayKey) === 1) {
-                    tripReq = dayRequests[0];
-                }
-            }
-
-            if (tripReq?.driverId) {
-                const driverName = driverMap[tripReq.driverId] || 'Unknown Driver';
-                ride.driverName = driverName;
-                ride.driverId = tripReq.driverId;
-                ride.status = tripReq.status || 'accepted';
-            }
-        });
-
-        // Resolve child names from children array
-        rides.forEach(ride => {
-            if (!ride.childName || ride.childName === 'Unknown Child') {
-                const child = children.find(c => c.id === ride.childId);
-                if (child) ride.childName = child.name;
-            }
-        });
-
-        // Update UI with all the real data
-        updateStats();
-        loadRecentDrivers();
-        loadRecentRides();
-        loadDrivers();
-        loadRides();
-        
-        // ADDED: Make sure to call the function that loads the children into the HTML table!
-        if (typeof loadChildren === 'function') {
-            loadChildren(); 
-        }
-
-    } catch (err) {
-        console.error('Error fetching from Firestore:', err);
-        alert("Error fetching data. Check your console for details.");
-    }
-}
-function useSampleData() {
-    // Sample data removed - login required to access real Firebase data
     drivers = [];
     rides = [];
     children = [];
+
+    document.getElementById('signInBtn')?.removeAttribute('hidden');
+    document.getElementById('emailLoginBtn')?.removeAttribute('hidden');
+    document.getElementById('logoutTopBtn')?.setAttribute('hidden', '');
+    document.getElementById('logoutBtn')?.setAttribute('hidden', '');
+
+    const nameEl = document.getElementById('sidebarUserName');
+    const roleEl = document.getElementById('sidebarUserRole');
+    if (nameEl) nameEl.textContent = t('auth.guest', 'Guest');
+    if (roleEl) roleEl.textContent = t('auth.signInToContinue', 'Sign in to continue');
+
+    const banner = document.getElementById('liveBanner');
+    if (banner) banner.hidden = true;
+
+    const loginModal = document.getElementById('loginModal');
+    const pageContent = document.getElementById('pageContent');
+    if (loginModal) loginModal.classList.add('active');
+    if (pageContent) pageContent.style.display = 'none';
+
+    renderAll();
 }
 
-function signInWithGoogle() {
-    if (typeof firebase === 'undefined' || !firebase?.auth) {
-        alert('Firebase is not available. Cannot sign in.');
-        return;
+function useSampleData() {
+    drivers = [];
+    rides = [];
+    children = [];
+    renderAll();
+}
+
+// ---------------- Live data subscriptions ----------------
+function clearLiveDataSubscriptions() {
+    liveDataUnsubscribers.forEach(unsubscribe => {
+        try { if (typeof unsubscribe === 'function') unsubscribe(); }
+        catch (err) { console.warn('Unsubscribe failed:', err); }
+    });
+    liveDataUnsubscribers = [];
+    if (liveRefreshTimer) { clearTimeout(liveRefreshTimer); liveRefreshTimer = null; }
+    isFetchingFirestoreData = false;
+    hasQueuedFirestoreRefresh = false;
+}
+
+function scheduleFirestoreRefresh(delayMs = 200) {
+    if (!firestore) return;
+    if (liveRefreshTimer) clearTimeout(liveRefreshTimer);
+    liveRefreshTimer = setTimeout(() => {
+        liveRefreshTimer = null;
+        refreshDataFromFirestore();
+    }, delayMs);
+}
+
+async function refreshDataFromFirestore() {
+    if (!firestore) return;
+    if (isFetchingFirestoreData) { hasQueuedFirestoreRefresh = true; return; }
+    isFetchingFirestoreData = true;
+    try {
+        await fetchDataFromFirestore();
+        renderAll();
+    } finally {
+        isFetchingFirestoreData = false;
+        if (hasQueuedFirestoreRefresh) {
+            hasQueuedFirestoreRefresh = false;
+            scheduleFirestoreRefresh(0);
+        }
     }
-    const provider = new firebase.auth.GoogleAuthProvider();
-    firebase.auth().signInWithPopup(provider).catch(err => {
-        alert('Sign-in failed: ' + err.message);
+}
+
+function initializeLiveDataSubscriptions() {
+    if (!firestore || typeof firestore.collection !== 'function') return;
+    clearLiveDataSubscriptions();
+
+    LIVE_DATA_COLLECTIONS.forEach(collectionName => {
+        const unsubscribe = firestore.collection(collectionName).onSnapshot(
+            () => scheduleFirestoreRefresh(),
+            (err) => console.error(`Live listener failed for "${collectionName}":`, err),
+        );
+        liveDataUnsubscribers.push(unsubscribe);
+    });
+
+    if (typeof firestore.collectionGroup === 'function') {
+        const childrenUnsub = firestore.collectionGroup('children').onSnapshot(
+            () => scheduleFirestoreRefresh(),
+            (err) => console.error('children collectionGroup listener failed:', err),
+        );
+        liveDataUnsubscribers.push(childrenUnsub);
+        const schedulesUnsub = firestore.collectionGroup('schedules').onSnapshot(
+            () => scheduleFirestoreRefresh(),
+            (err) => console.error('schedules collectionGroup listener failed:', err),
+        );
+        liveDataUnsubscribers.push(schedulesUnsub);
+    }
+}
+
+// ---------------- Firestore fetch ----------------
+async function fetchDataFromFirestore() {
+    if (!firestore) return;
+
+    const driversSnap = await firestore.collection('drivers').get();
+    drivers = driversSnap.docs.map(doc => window.normalizeDriverFromFirestore(doc.id, doc.data()));
+    const driverMap = {};
+    driversSnap.forEach(doc => {
+        const d = doc.data();
+        driverMap[doc.id] = d.fullName || d.name || [d.firstName, d.lastName].filter(Boolean).join(' ') || 'Unknown Driver';
+    });
+
+    // Rides (flatten trips from parents/children/schedules)
+    const collectedRides = [];
+    const collectedChildren = [];
+    const parentsSnap = await firestore.collection('parents').get();
+
+    for (const parentDoc of parentsSnap.docs) {
+        const parentId = parentDoc.id;
+        const parentData = parentDoc.data();
+        const parentName = parentData.fullName || parentData.name || 'Unknown Parent';
+        const parentPhone =
+            parentData.phone || parentData.phoneNumber || parentData.mobile || parentData.whatsapp || 'N/A';
+        const parentBaladia = parentData.baladia?.id || parentData.baladia?.name || parentData.baladia || '';
+        const parentWilaya = parentData.wilaya?.code || parentData.wilaya?.name || parentData.wilaya || '';
+
+        const childrenSnap = await parentDoc.ref.collection('children').get();
+        for (const childDoc of childrenSnap.docs) {
+            const childId = childDoc.id;
+            const childData = childDoc.data();
+            const childName = childData.firstName || childData.fullName || 'Unknown Child';
+            const childAge = calculateAge(childData.dateOfBirth);
+            const childPhotoUrl = childData.photoUrl || null;
+
+            collectedChildren.push({
+                __docId: childId,
+                id: childId,
+                name: childName,
+                age: childAge,
+                parent: parentName,
+                parentPhone,
+                parentId,
+                photoUrl: childPhotoUrl,
+            });
+
+            const schedulesSnap = await childDoc.ref.collection('schedules').get();
+            for (const scheduleDoc of schedulesSnap.docs) {
+                const scheduleData = scheduleDoc.data();
+                const day = scheduleData.day || scheduleDoc.id;
+                const trips = scheduleData.trips || [];
+
+                trips.forEach((trip, index) => {
+                    const tripAssignedDriverId = String(trip.assignedDriverId || trip.driverId || '').trim();
+                    const rawStatus = String(trip.status || 'pending').trim().toLowerCase();
+                    const driverName = tripAssignedDriverId
+                        ? (driverMap[tripAssignedDriverId] || 'Unknown Driver')
+                        : 'Pending Driver';
+
+                    const pickupObj = trip.pickupLocation || trip.pickup || {};
+                    const dropoffObj = trip.dropoffLocation || trip.dropoff || {};
+                    const pickupDisplay = formatPlaceLabel(pickupObj, 'Unknown pickup');
+                    const dropoffDisplay = formatPlaceLabel(dropoffObj, 'Unknown dropoff');
+
+                    collectedRides.push({
+                        __docId: scheduleDoc.id,
+                        id: `${parentId}-${childId}-${day}-${index}`,
+                        scheduleField: 'trips',
+                        dayIndex: -1,
+                        tripIndex: index,
+                        childName,
+                        childAge,
+                        childPhotoUrl,
+                        parentName,
+                        parentPhone,
+                        driverName,
+                        pickup: pickupDisplay,
+                        dropoff: dropoffDisplay,
+                        pickupLat: numFromCoord(pickupObj.lat),
+                        pickupLng: numFromCoord(pickupObj.lng),
+                        pickupLocationFull: pickupObj,
+                        dropoffLocationFull: dropoffObj,
+                        pickupBaladia: pickupObj.baladia?.id || pickupObj.baladia?.name || parentBaladia,
+                        pickupWilaya: pickupObj.wilaya?.code || pickupObj.wilaya?.name || parentWilaya,
+                        idTrip: trip.idTrip || '',
+                        tripType: trip.type || 'other',
+                        fromLabel: trip.from || '',
+                        toLabel: trip.to || '',
+                        isPaused: trip.isPaused || false,
+                        isScheduleActive: scheduleData.isActive !== false,
+                        childId,
+                        parentId,
+                        driverId: tripAssignedDriverId,
+                        time: trip.time || 'N/A',
+                        day,
+                        status: tripAssignedDriverId && rawStatus === 'pending' ? 'accepted' : (rawStatus || 'pending'),
+                    });
+                });
+            }
+        }
+    }
+
+    rides = collectedRides;
+    children = collectedChildren;
+}
+
+function formatPlaceLabel(place, fallback) {
+    if (!place || typeof place !== 'object') return fallback;
+    const label =
+        place.label || place.name || place.address || place.title || place.description || place.locationName || '';
+    if (label && !/detecting place/i.test(label)) return label;
+
+    const lat = numFromCoord(place.lat);
+    const lng = numFromCoord(place.lng);
+    if (lat != null && lng != null) return `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+    return fallback || 'Unknown';
+}
+
+// ---------------- Theme ----------------
+function initializeTheme() {
+    const stored = localStorage.getItem('tk.theme');
+    const initial = stored || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    applyTheme(initial);
+
+    document.getElementById('themeToggle')?.addEventListener('click', () => {
+        const current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+        applyTheme(current === 'dark' ? 'light' : 'dark');
     });
 }
 
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('tk.theme', theme);
+    const toggle = document.getElementById('themeToggle');
+    if (toggle) {
+        const icon = toggle.querySelector('i');
+        if (icon) icon.className = theme === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
+    }
+}
+
+// ---------------- Navigation ----------------
 function initializeNavigation() {
-    document.querySelectorAll('.nav-item, .view-all').forEach(link => {
+    document.querySelectorAll('.nav-item[data-page]').forEach(link => {
         link.addEventListener('click', (e) => {
             e.preventDefault();
-            const page = link.getAttribute('data-page');
-            switchPage(page, { refreshData: true, updateHash: true });
-            if (window.matchMedia('(max-width: 768px)').matches) {
-                document.getElementById('sidebar')?.classList.remove('active');
-            }
+            switchPage(link.getAttribute('data-page'), { updateHash: true });
         });
     });
-
-    document.querySelectorAll('.stat-card[data-page]').forEach(card => {
-        const openCardPage = () => {
-            const page = card.getAttribute('data-page');
-            switchPage(page, { refreshData: true, updateHash: true });
-
-            const filter = card.getAttribute('data-driver-filter');
-            if (page === 'drivers' && filter) {
+    document.querySelectorAll('[data-page]:not(.nav-item)').forEach(el => {
+        el.addEventListener('click', () => {
+            const filter = el.getAttribute('data-driver-filter');
+            if (filter) {
                 driverTableFilter = filter;
-                document.querySelectorAll('#driversPage .filter-btn').forEach(btn => {
-                    const btnFilter = btn.getAttribute('data-filter') || 'all';
-                    btn.classList.toggle('active', btnFilter === filter);
-                });
-                loadDrivers();
+                setActiveFilterButton('filter-btn', 'data-filter', filter);
             }
-        };
-
-        card.addEventListener('click', openCardPage);
-        card.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                openCardPage();
-            }
+            switchPage(el.getAttribute('data-page'), { updateHash: true });
         });
     });
-
     window.addEventListener('hashchange', () => {
-        switchPage(window.location.hash.replace('#', ''), { refreshData: true, updateHash: false });
+        const hash = location.hash.replace('#', '');
+        if (hash) switchPage(hash, { updateHash: false });
     });
 }
 
-function normalizePage(page) {
-    const normalized = String(page || '').trim().toLowerCase();
-    return Object.prototype.hasOwnProperty.call(PAGE_TITLES, normalized) ? normalized : DEFAULT_PAGE;
-}
-
-function setActiveNavigation(page) {
-    document.querySelectorAll('.nav-item').forEach(item => {
-        const isActive = item.getAttribute('data-page') === page;
-        item.classList.toggle('active', isActive);
-        if (isActive) item.setAttribute('aria-current', 'page');
-        else item.removeAttribute('aria-current');
+function switchPage(page, { updateHash = true, refreshData = false } = {}) {
+    const target = normalizePage(page);
+    document.querySelectorAll('.nav-item[data-page]').forEach(link => {
+        link.classList.toggle('active', link.getAttribute('data-page') === target);
     });
-}
+    document.querySelectorAll('.page').forEach(p => p.setAttribute('hidden', ''));
+    const el = document.getElementById(`${target}Page`);
+    if (el) el.removeAttribute('hidden');
+    const titleEl = document.getElementById('pageTitle');
+    if (titleEl) titleEl.textContent = t(PAGE_TITLES[target], target);
+    if (updateHash) history.replaceState(null, '', `#${target}`);
+    if (refreshData) refreshDataFromFirestore();
 
-function refreshPageData(page) {
-    if (page === 'dashboard') {
-        updateStats();
-        loadRecentDrivers();
-        loadRecentRides();
-        return;
+    // When switching to dashboard, recompute map size once it's visible
+    if (target === 'dashboard' && window.fleetMap) {
+        setTimeout(() => window.fleetMap.updateFleetMap(drivers), 50);
     }
-    if (page === 'drivers') loadDrivers();
-    else if (page === 'rides') loadRides();
-    else if (page === 'children') loadChildren();
+    // Close mobile sidebar after nav
+    document.getElementById('sidebar')?.classList.remove('open');
+
+    renderAll();
 }
 
-function switchPage(page, options = {}) {
-    const currentPage = normalizePage(page);
-    const shouldRefreshData = options.refreshData === true;
-    const shouldUpdateHash = options.updateHash === true;
-
-    document.querySelectorAll('.page').forEach(p => p.style.display = 'none');
-    const pageElement = document.getElementById(`${currentPage}Page`);
-    if (pageElement) pageElement.style.display = 'block';
-    setActiveNavigation(currentPage);
-
-    if (shouldUpdateHash) {
-        const nextHash = `#${currentPage}`;
-        if (window.location.hash !== nextHash && window.history?.replaceState) {
-            window.history.replaceState(null, '', nextHash);
-        }
-    }
-
-    if (shouldRefreshData) refreshPageData(currentPage);
-    document.getElementById('pageTitle').textContent = PAGE_TITLES[currentPage];
+function loadDashboard() {
+    const hashPage = window.location.hash.replace('#', '');
+    switchPage(hashPage || DEFAULT_PAGE, { refreshData: false, updateHash: Boolean(hashPage) });
 }
 
-function initializeTheme() {
-    const theme = localStorage.getItem('theme') || 'light';
-    document.documentElement.setAttribute('data-theme', theme);
-    document.querySelector('#themeToggle i').className = theme === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
-}
-
+// ---------------- Event listeners ----------------
 function setupEventListeners() {
-    document.getElementById('themeToggle').addEventListener('click', () => {
-        const currentTheme = document.documentElement.getAttribute('data-theme');
-        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-        document.documentElement.setAttribute('data-theme', newTheme);
-        localStorage.setItem('theme', newTheme);
-        document.querySelector('#themeToggle i').className = newTheme === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
-    });
-    
-    document.getElementById('sidebarToggle')?.addEventListener('click', () => document.getElementById('sidebar').classList.toggle('active'));
-    document.getElementById('logoutBtn').addEventListener('click', performLogout);
-    document.getElementById('logoutTopBtn')?.addEventListener('click', performLogout);
-    document.getElementById('closeModal')?.addEventListener('click', () => document.getElementById('driverModal').classList.remove('active'));
-    document.getElementById('signInBtn')?.addEventListener('click', signInWithGoogle);
-    document.getElementById('emailLoginBtn')?.addEventListener('click', () => {
-        const loginModal = document.getElementById('loginModal');
-        if (loginModal) loginModal.classList.add('active');
-    });
-    document.getElementById('googleLoginBtn')?.addEventListener('click', signInWithGoogle);
-    document.getElementById('closeLoginModal')?.addEventListener('click', () => {
-        const loginModal = document.getElementById('loginModal');
-        if (loginModal) loginModal.classList.remove('active');
-    });
-    
-    // Login tab switching
-    document.getElementById('emailTabBtn')?.addEventListener('click', (e) => {
-        e.preventDefault();
-        document.querySelector('#emailTabContent')?.classList.add('active');
-        document.querySelector('#googleTabContent')?.classList.remove('active');
-        document.getElementById('emailTabBtn')?.classList.add('active');
-        document.getElementById('googleTabBtn')?.classList.remove('active');
-    });
-    document.getElementById('googleTabBtn')?.addEventListener('click', (e) => {
-        e.preventDefault();
-        document.querySelector('#emailTabContent')?.classList.remove('active');
-        document.querySelector('#googleTabContent')?.classList.add('active');
-        document.getElementById('emailTabBtn')?.classList.remove('active');
-        document.getElementById('googleTabBtn')?.classList.add('active');
+    document.getElementById('sidebarToggle')?.addEventListener('click', () => {
+        const sidebar = document.getElementById('sidebar');
+        if (!sidebar) return;
+        // Mobile: toggle open class; desktop: toggle collapsed
+        if (window.matchMedia('(max-width: 1024px)').matches) {
+            sidebar.classList.toggle('open');
+        } else {
+            sidebar.classList.toggle('collapsed');
+        }
     });
 
-    // Email login form
-    document.getElementById('emailLoginForm')?.addEventListener('submit', (e) => {
-        e.preventDefault();
-        const email = document.getElementById('loginEmail')?.value || '';
-        const password = document.getElementById('loginPassword')?.value || '';
-        
-        if (!email || !password) {
-            alert('Please enter both email and password.');
-            return;
-        }
-        
-        if (typeof firebase === 'undefined' || !firebase?.auth) {
-            alert('Firebase is not available. Cannot sign in.');
-            return;
-        }
-        
-        firebase.auth().signInWithEmailAndPassword(email, password).catch(err => {
-            alert('Email login failed: ' + err.message);
+    document.getElementById('driverSearch')?.addEventListener('input', (e) => {
+        driverSearchQuery = String(e.target.value || '').trim().toLowerCase();
+        renderDriversPage();
+    });
+    document.querySelectorAll('#driversPage .filter-btn[data-filter]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            driverTableFilter = btn.getAttribute('data-filter');
+            setActiveFilterButton('filter-btn', 'data-filter', driverTableFilter);
+            renderDriversPage();
         });
     });
 
-    const driverModal = document.getElementById('driverModal');
-    driverModal?.addEventListener('click', (e) => {
-        if (e.target === driverModal) driverModal.classList.remove('active');
+    document.getElementById('rideSearch')?.addEventListener('input', (e) => {
+        rideSearchQuery = String(e.target.value || '').trim().toLowerCase();
+        renderRidesPage();
+    });
+    document.querySelectorAll('#ridesPage .filter-btn[data-ride-filter]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            rideTableFilter = btn.getAttribute('data-ride-filter');
+            setActiveFilterButton('filter-btn', 'data-ride-filter', rideTableFilter);
+            renderRidesPage();
+        });
+    });
+
+    document.getElementById('childSearch')?.addEventListener('input', () => renderChildrenPage());
+
+    // Modal close buttons
+    document.getElementById('closeModal')?.addEventListener('click', () => {
+        document.getElementById('driverModal')?.classList.remove('active');
+    });
+    document.getElementById('closeAssignModal')?.addEventListener('click', closeAssignDriverModal);
+    document.getElementById('closeLoginModal')?.addEventListener('click', () => {
+        document.getElementById('loginModal')?.classList.remove('active');
+    });
+    document.addEventListener('click', (e) => {
+        // Close modal when clicking backdrop
+        if (e.target.classList.contains('modal')) e.target.classList.remove('active');
     });
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
-            driverModal?.classList.remove('active');
-            document.getElementById('assignDriverModal')?.classList.remove('active');
-            document.getElementById('loginModal')?.classList.remove('active');
+            document.querySelectorAll('.modal.active').forEach(m => {
+                if (m.id !== 'loginModal') m.classList.remove('active');
+            });
         }
     });
 
-    setupDriverFiltersAndSearch();
-    setupRideSearch();
-    setupDriverActionDelegation();
-
-    const assignModal = document.getElementById('assignDriverModal');
-    document.getElementById('closeAssignModal')?.addEventListener('click', () => closeAssignDriverModal());
-    assignModal?.addEventListener('click', (e) => {
-        if (e.target === assignModal) closeAssignDriverModal();
+    // Assign driver list delegation
+    document.getElementById('assignDriverList')?.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-assign-pick]');
+        if (!btn) return;
+        assignDriverToRide(btn.getAttribute('data-ride-id'), btn.getAttribute('data-driver-id'));
     });
     document.getElementById('assignAllowModify')?.addEventListener('change', () => {
-        const activeRideId = assignModal?.getAttribute('data-ride-id');
-        if (activeRideId) {
-            renderAssignDriverList(activeRideId);
-        }
-    });
-}
-
-function setupRideSearch() {
-    const input = document.getElementById('rideSearch');
-    input?.addEventListener('input', () => {
-        rideSearchQuery = input.value;
-        loadRides();
-    });
-}
-
-function setupDriverFiltersAndSearch() {
-    const searchInput = document.getElementById('driverSearch');
-    searchInput?.addEventListener('input', () => {
-        driverSearchQuery = searchInput.value;
-        loadDrivers();
+        const modal = document.getElementById('assignDriverModal');
+        const rideId = modal?.getAttribute('data-ride-id');
+        if (rideId) renderAssignDriverList(rideId);
     });
 
-    document.querySelectorAll('#driversPage .filter-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            document.querySelectorAll('#driversPage .filter-btn').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            driverTableFilter = btn.getAttribute('data-filter') || 'all';
-            loadDrivers();
+    // Login handlers
+    document.getElementById('signInBtn')?.addEventListener('click', () => {
+        document.getElementById('loginModal')?.classList.add('active');
+    });
+    document.getElementById('emailLoginBtn')?.addEventListener('click', () => {
+        document.getElementById('loginModal')?.classList.add('active');
+        document.getElementById('emailTabBtn')?.click();
+    });
+    document.querySelectorAll('.login-tab[data-tab]').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const name = tab.getAttribute('data-tab');
+            document.querySelectorAll('.login-tab').forEach(t => t.classList.toggle('active', t === tab));
+            document.querySelectorAll('.login-tab-content').forEach(c => {
+                c.classList.toggle('active', c.id === `${name}TabContent`);
+            });
         });
     });
-}
+    document.getElementById('emailLoginForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const email = document.getElementById('loginEmail').value;
+        const password = document.getElementById('loginPassword').value;
+        try {
+            await firebase.auth().signInWithEmailAndPassword(email, password);
+            document.getElementById('loginModal')?.classList.remove('active');
+        } catch (err) {
+            showToast({ title: 'Login failed', body: err.message || 'Try again', variant: 'error' });
+        }
+    });
+    document.getElementById('googleLoginBtn')?.addEventListener('click', async () => {
+        try {
+            const provider = new firebase.auth.GoogleAuthProvider();
+            await firebase.auth().signInWithPopup(provider);
+            document.getElementById('loginModal')?.classList.remove('active');
+        } catch (err) {
+            showToast({ title: 'Login failed', body: err.message || 'Try again', variant: 'error' });
+        }
+    });
+    const doLogout = async () => {
+        try { await firebase.auth().signOut(); } catch { /* ignore */ }
+    };
+    document.getElementById('logoutBtn')?.addEventListener('click', doLogout);
+    document.getElementById('logoutTopBtn')?.addEventListener('click', doLogout);
 
-function setupDriverActionDelegation() {
-    document.addEventListener('click', (e) => {
-        const assignRide = e.target.closest('button[data-ride-action="assign"]');
-        if (assignRide) {
-            openAssignDriverModal(assignRide.getAttribute('data-ride-id'));
-            return;
-        }
-        const assignPick = e.target.closest('button[data-assign-pick]');
-        if (assignPick) {
-            assignDriverToRide(
-                assignPick.getAttribute('data-ride-id'),
-                assignPick.getAttribute('data-driver-id')
-            );
-            return;
-        }
-        const btn = e.target.closest('button[data-driver-action]');
-        if (!btn) return;
-        const id = btn.getAttribute('data-driver-id');
-        if (!id) return;
-        const action = btn.getAttribute('data-driver-action');
-        if (action === 'view') openDriverReport(id);
-        else if (action === 'approve') approveDriver(id);
+    // Re-render on language change
+    document.addEventListener('i18n:changed', () => {
+        const activePage = document.querySelector('.nav-item.active')?.getAttribute('data-page') || DEFAULT_PAGE;
+        const titleEl = document.getElementById('pageTitle');
+        if (titleEl) titleEl.textContent = t(PAGE_TITLES[activePage], activePage);
+        renderAll();
     });
 }
 
-function getDriversForTable() {
-    let list = drivers.slice();
-    if (driverTableFilter === 'pending') list = list.filter(d => d.status === 'pending');
-    else if (driverTableFilter === 'approved') list = list.filter(d => d.status === 'approved');
-    else if (driverTableFilter === 'rejected') list = list.filter(d => d.status === 'rejected');
-    const q = driverSearchQuery.trim().toLowerCase();
-    if (q) {
-        list = list.filter(d =>
-            String(d.name || '').toLowerCase().includes(q) ||
-            String(d.email || '').toLowerCase().includes(q) ||
-            String(d.phone || '').toLowerCase().includes(q)
-        );
-    }
-    return list;
+function setActiveFilterButton(cls, attr, value) {
+    document.querySelectorAll(`.${cls}[${attr}]`).forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute(attr) === value);
+    });
 }
 
-function getRidesForTable() {
-    const q = rideSearchQuery.trim().toLowerCase();
-    if (!q) return rides.slice();
-    return rides.filter(r =>
-        String(r.childName || '').toLowerCase().includes(q) ||
-        String(r.driverName || '').toLowerCase().includes(q) ||
-        String(r.pickup || '').toLowerCase().includes(q) ||
-        String(r.dropoff || '').toLowerCase().includes(q) ||
-        String(r.status || '').toLowerCase().includes(q)
-    );
+// ---------------- Rendering (all) ----------------
+function renderAll() {
+    renderStats();
+    renderRecentDrivers();
+    renderRecentRides();
+    renderDriversPage();
+    renderRidesPage();
+    renderDispatchPage();
+    renderChildrenPage();
+    renderOnlineDrivers();
+    if (window.fleetMap) window.fleetMap.updateFleetMap(drivers);
 }
 
-function updateStats() {
-    document.getElementById('totalDrivers').textContent = drivers.length;
-    const pending = drivers.filter(d => !d.isApproved).length;
-    document.getElementById('pendingDrivers').textContent = pending;
+function renderStats() {
+    const pending = drivers.filter(d => d.status === 'pending').length;
+    setText('totalDrivers', drivers.length);
+    setText('pendingDrivers', pending);
+    setText('totalRides', rides.length);
+    setText('totalChildren', children.length);
     const badge = document.getElementById('pendingDriversBadge');
-    if (badge) badge.textContent = String(pending);
-    document.getElementById('totalRides').textContent = rides.length;
-    const totalChildrenEl = document.getElementById('totalChildren');
-    if (totalChildrenEl) totalChildrenEl.textContent = children.length;
+    if (badge) {
+        badge.textContent = String(pending);
+        badge.setAttribute('data-count', String(pending));
+    }
 }
 
-function driverActionButtons(driver, { approve } = { approve: false }) {
-    const idAttr = escapeAttr(driver.id);
-    const approveBtn = approve && !driver.isApproved && driver.status === 'pending'
-        ? `<button type="button" class="btn btn-sm btn-success" data-driver-action="approve" data-driver-id="${idAttr}">Approve</button>`
-        : '';
-    return `<div style="display: flex; gap: 8px; flex-wrap: wrap;">${approveBtn}<button type="button" class="btn btn-sm btn-primary" data-driver-action="view" data-driver-id="${idAttr}">View</button></div>`;
+function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = String(value);
 }
 
-function loadRecentDrivers() {
-    document.getElementById('recentDriversTable').innerHTML = drivers.slice(0, 5).map(driver => `
+function renderRecentDrivers() {
+    const tbody = document.getElementById('recentDriversTable');
+    if (!tbody) return;
+    const recent = [...drivers]
+        .sort((a, b) => String(b.registrationDate).localeCompare(String(a.registrationDate)))
+        .slice(0, 5);
+    if (!recent.length) {
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="4">${escapeHtml(t('common.noData', 'No data'))}</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = recent.map(driver => `
         <tr>
-            <td>${escapeHtml(driver.name)}</td>
-            <td>${escapeHtml(driver.email)}</td>
+            <td>
+                <div class="table-cell-with-avatar">
+                    <div class="cell-avatar">${renderAvatar(driver.profilePhotoUrl, driver.name)}</div>
+                    <div class="cell-stack">
+                        <strong>${escapeHtml(driver.name)}</strong>
+                        <small>${escapeHtml(driver.email)}</small>
+                    </div>
+                </div>
+            </td>
             <td><span class="status-badge status-${driverStatusClass(driver.status)}">${escapeHtml(driver.status)}</span></td>
-            <td>${formatDate(driver.registrationDate)}</td>
-            <td>${driverActionButtons(driver, { approve: true })}</td>
+            <td class="text-sm">${escapeHtml(formatDate(driver.registrationDate))}</td>
+            <td><button type="button" class="btn btn-sm" data-driver-id="${escapeAttr(driver.id)}" data-action="view">${escapeHtml(t('common.viewAll', 'View'))}</button></td>
+        </tr>
+    `).join('');
+    tbody.querySelectorAll('[data-action="view"]').forEach(btn => {
+        btn.addEventListener('click', () => openDriverModal(btn.getAttribute('data-driver-id')));
+    });
+}
+
+function renderRecentRides() {
+    const tbody = document.getElementById('recentRidesTable');
+    if (!tbody) return;
+    const recent = rides.slice(0, 5);
+    if (!recent.length) {
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="5">${escapeHtml(t('common.noData', 'No data'))}</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = recent.map(ride => `
+        <tr>
+            <td><strong>${escapeHtml(getRideChildName(ride))}</strong></td>
+            <td class="text-sm">${escapeHtml(ride.day)}</td>
+            <td class="text-sm">${escapeHtml(ride.driverName)}</td>
+            <td><span class="status-badge status-${rideStatusClass(getEffectiveRideStatus(ride))}">${escapeHtml(getEffectiveRideStatus(ride))}</span></td>
+            <td class="text-sm">${escapeHtml(ride.time)}</td>
         </tr>
     `).join('');
 }
 
-function loadRecentRides() {
-    document.getElementById('recentRidesTable').innerHTML = rides.slice(0, 5).map(ride => {
-        const childName = getRideChildName(ride);
-        const driverName = ride.driverName || 'Pending Driver';
-        const pickup = ride.pickup;
-        const dropoff = ride.dropoff;
-        const effectiveStatus = getEffectiveRideStatus(ride);
-        const statusClass = rideStatusClass(effectiveStatus);
-        return `
-        <tr>
-            <td>${escapeHtml(childName)}</td>
-            <td>${escapeHtml(ride.day)}</td>
-            <td>${escapeHtml(driverName)}</td>
-            <td>${escapeHtml(pickup)}</td>
-            <td>${escapeHtml(dropoff)}</td>
-            <td><span class="status-badge status-${statusClass}">${escapeHtml(effectiveStatus)}</span></td>
-            <td>${escapeHtml(ride.time)}</td>
-        </tr>
-    `;
-    }).join('');
+function renderAvatar(url, name) {
+    if (url) return `<img src="${escapeAttr(url)}" alt="" onerror="this.outerHTML='<span>${escapeHtml(initials(name))}</span>'">`;
+    return `<span>${escapeHtml(initials(name))}</span>`;
 }
 
-function loadDrivers() {
-    const list = getDriversForTable();
-    document.getElementById('driversTable').innerHTML = list.map(driver => `
+// ---------------- Drivers page ----------------
+function renderDriversPage() {
+    const tbody = document.getElementById('driversTable');
+    if (!tbody) return;
+    const filtered = drivers.filter(driver => {
+        if (driverTableFilter !== 'all' && driver.status !== driverTableFilter) return false;
+        if (!driverSearchQuery) return true;
+        const hay = `${driver.name} ${driver.email} ${driver.phone} ${driver.vehiclePlate}`.toLowerCase();
+        return hay.includes(driverSearchQuery);
+    });
+    if (!filtered.length) {
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="6">${escapeHtml(t('common.noData', 'No drivers'))}</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = filtered.map(driver => `
         <tr>
-            <td>${escapeHtml(driver.name)}</td>
-            <td>${escapeHtml(driver.email)}</td>
-            <td>${escapeHtml(driver.phone)}</td>
+            <td>
+                <div class="table-cell-with-avatar">
+                    <div class="cell-avatar">${renderAvatar(driver.profilePhotoUrl, driver.name)}</div>
+                    <div class="cell-stack">
+                        <strong>${escapeHtml(driver.name)}</strong>
+                        <small>${escapeHtml(driver.wilaya || '')}</small>
+                    </div>
+                </div>
+            </td>
+            <td class="text-sm">
+                <div class="cell-stack">
+                    <span>${escapeHtml(driver.phone)}</span>
+                    <small>${escapeHtml(driver.email)}</small>
+                </div>
+            </td>
+            <td class="text-sm">${escapeHtml([driver.vehicleMake, driver.vehicleModel].filter(Boolean).join(' ') || '—')}</td>
             <td><span class="status-badge status-${driverStatusClass(driver.status)}">${escapeHtml(driver.status)}</span></td>
-            <td>${formatDate(driver.registrationDate)}</td>
-            <td>${driverActionButtons(driver, { approve: true })}</td>
+            <td class="text-sm">${escapeHtml(formatDate(driver.registrationDate))}</td>
+            <td><button type="button" class="btn btn-sm" data-driver-id="${escapeAttr(driver.id)}" data-action="view">${escapeHtml(t('common.viewAll', 'View'))}</button></td>
         </tr>
     `).join('');
+    tbody.querySelectorAll('[data-action="view"]').forEach(btn => {
+        btn.addEventListener('click', () => openDriverModal(btn.getAttribute('data-driver-id')));
+    });
 }
 
-function loadRides() {
-    const list = getRidesForTable();
-    document.getElementById('ridesTable').innerHTML = list.map(ride => {
-        const effectiveStatus = getEffectiveRideStatus(ride);
-        const statusClass = rideStatusClass(effectiveStatus);
-        const alreadyAssigned = isRideAssigned(ride);
-        const assignBtn = isAdmin
-            ? `<button type="button" class="btn btn-sm btn-primary" data-ride-action="assign" data-ride-id="${escapeAttr(ride.id)}">${alreadyAssigned ? 'Manage driver' : 'Assign driver'}</button>`
-            : '-';
+// ---------------- Rides page ----------------
+function renderRidesPage() {
+    const tbody = document.getElementById('ridesTable');
+    if (!tbody) return;
+    const filtered = rides.filter(ride => {
+        const status = getEffectiveRideStatus(ride);
+        if (rideTableFilter !== 'all' && status !== rideTableFilter) return false;
+        if (!rideSearchQuery) return true;
+        const hay = `${getRideChildName(ride)} ${ride.driverName} ${ride.pickup} ${ride.dropoff}`.toLowerCase();
+        return hay.includes(rideSearchQuery);
+    });
+    if (!filtered.length) {
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="8">${escapeHtml(t('common.noData', 'No rides'))}</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = filtered.map(ride => {
+        const assigned = isRideAssigned(ride);
+        const status = getEffectiveRideStatus(ride);
+        const actionLabel = assigned ? t('assign.change', 'Change') : t('assign.assign', 'Assign');
         return `
-        <tr>
-            <td>${escapeHtml(ride.childName)}</td>            <td>${escapeHtml(ride.day)}</td>            <td>${escapeHtml(ride.driverName)}</td>
-            <td>${escapeHtml(ride.pickup)}</td>
-            <td>${escapeHtml(ride.dropoff)}</td>
-            <td>${escapeHtml(ride.time)}</td>
-            <td><span class="status-badge status-${statusClass}">${escapeHtml(effectiveStatus)}</span></td>
-            <td>${assignBtn}</td>
-        </tr>
-    `;
+            <tr>
+                <td><strong>${escapeHtml(getRideChildName(ride))}</strong></td>
+                <td class="text-sm">${escapeHtml(ride.day)}</td>
+                <td class="text-sm">${escapeHtml(ride.driverName)}</td>
+                <td class="text-sm">${escapeHtml(ride.pickup)}</td>
+                <td class="text-sm">${escapeHtml(ride.dropoff)}</td>
+                <td class="text-sm">${escapeHtml(ride.time)}</td>
+                <td><span class="status-badge status-${rideStatusClass(status)}">${escapeHtml(status)}</span></td>
+                <td><button type="button" class="btn btn-sm btn-primary" data-ride-id="${escapeAttr(ride.id)}" data-action="assign">${escapeHtml(actionLabel)}</button></td>
+            </tr>
+        `;
     }).join('');
+    tbody.querySelectorAll('[data-action="assign"]').forEach(btn => {
+        btn.addEventListener('click', () => openAssignDriverModal(btn.getAttribute('data-ride-id')));
+    });
 }
-function loadChildren() {
-    // Look for the table body ID in your HTML. 
-    // If your HTML uses a different ID for the children table, change 'childrenTable' to match it!
-    const childrenTableBody = document.getElementById('childrenTable');
-    
-    // Safety check: only try to load the table if the table actually exists on the screen
-    if (!childrenTableBody) return; 
 
-    childrenTableBody.innerHTML = children.map(child => `
+// ---------------- Dispatch page ----------------
+function renderDispatchPage() {
+    const tbody = document.getElementById('dispatchTable');
+    if (!tbody) return;
+    const unassigned = rides.filter(r => !isRideAssigned(r));
+    const summary = document.getElementById('dispatchSummary');
+    if (summary) summary.textContent = `${unassigned.length} / ${rides.length}`;
+    if (!unassigned.length) {
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="6">${escapeHtml(t('dispatch.noUnassigned', 'All rides have a driver assigned.'))}</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = unassigned.map(ride => {
+        const candidates = window.dispatcher
+            ? window.dispatcher.scoreCandidates(drivers, ride, rides)
+            : [];
+        const top = candidates[0];
+        const topLabel = top
+            ? `${escapeHtml(top.driver.name || 'Driver')} · ${top.distKm != null ? top.distKm.toFixed(1) + ' km' : '—'} · ${Math.round(top.score * 100)}%`
+            : '<span class="text-muted">—</span>';
+        return `
+            <tr>
+                <td><strong>${escapeHtml(getRideChildName(ride))}</strong></td>
+                <td class="text-sm">${escapeHtml(ride.day)}</td>
+                <td class="text-sm">${escapeHtml(ride.pickup)}</td>
+                <td class="text-sm">${escapeHtml(ride.time)}</td>
+                <td class="text-sm">${topLabel}</td>
+                <td><button type="button" class="btn btn-sm btn-primary" data-ride-id="${escapeAttr(ride.id)}" data-action="assign">${escapeHtml(t('dispatch.assign', 'Assign'))}</button></td>
+            </tr>
+        `;
+    }).join('');
+    tbody.querySelectorAll('[data-action="assign"]').forEach(btn => {
+        btn.addEventListener('click', () => openAssignDriverModal(btn.getAttribute('data-ride-id')));
+    });
+}
+
+// ---------------- Children page ----------------
+function renderChildrenPage() {
+    const tbody = document.getElementById('childrenTable');
+    if (!tbody) return;
+    const q = String(document.getElementById('childSearch')?.value || '').trim().toLowerCase();
+    const filtered = children.filter(child => {
+        if (!q) return true;
+        return `${child.name} ${child.parent} ${child.parentPhone}`.toLowerCase().includes(q);
+    });
+    if (!filtered.length) {
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="4">${escapeHtml(t('common.noData', 'No children'))}</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = filtered.map(child => `
         <tr>
-            <td>${escapeHtml(child.name)}</td>
-            <td>${escapeHtml(child.age)}</td>
-            <td>${escapeHtml(child.parent)}</td>
-            <td>${escapeHtml(child.parentPhone || "N/A")}</td>
+            <td>
+                <div class="table-cell-with-avatar">
+                    <div class="cell-avatar">${renderAvatar(child.photoUrl, child.name)}</div>
+                    <strong>${escapeHtml(child.name)}</strong>
+                </div>
+            </td>
+            <td class="text-sm">${escapeHtml(String(child.age))}</td>
+            <td class="text-sm">${escapeHtml(child.parent)}</td>
+            <td class="text-sm">${escapeHtml(child.parentPhone)}</td>
         </tr>
     `).join('');
 }
 
-// --- CORE ADMIN FUNCTION ---
-async function approveDriver(id) {
-    const driver = drivers.find(d => d.id === id);
-    if (!driver) {
-        alert('Driver not found.');
+// ---------------- Online drivers side panel ----------------
+function renderOnlineDrivers() {
+    const list = document.getElementById('onlineDriversList');
+    const count = document.getElementById('onlineDriversCount');
+    if (!list) return;
+    const online = drivers.filter(d => d.isOnline);
+    if (count) count.textContent = String(online.length);
+    if (!online.length) {
+        list.innerHTML = `
+            <div class="empty-state">
+                <i class="fas fa-wifi"></i>
+                <h3>${escapeHtml(t('common.noData', 'No drivers online'))}</h3>
+            </div>`;
         return;
     }
-    if (driver.isApproved || driver.status === 'approved') {
-        alert('This driver is already approved.');
-        return;
-    }
-    if (driver.status === 'rejected') {
-        alert('This driver was rejected and cannot be approved from the dashboard without a database update.');
-        return;
-    }
-
-    if (!confirm('Approve this driver? This will verify their KYC documents.')) return;
-
-    if (isAdmin && firestore) {
-        try {
-            const docId = driver.__docId || driver.id;
-            await firestore.collection('drivers').doc(docId).update({ 
-                isApproved: true, 
-                'kyc.status': 'verified',
-                'kyc.reviewedAt': new Date().toISOString()
-            });
-            alert('Driver approved successfully!');
-            await refreshDataFromFirestore();
-        } catch (err) {
-            console.error('Failed to update Firestore:', err);
-            alert('Error updating database. Check permissions.');
-        }
-    } else {
-        driver.isApproved = true;
-        driver.status = 'approved';
-        alert('Driver approved in this session only. Sign in as an admin with Firestore access to save to the database.');
-        updateStats();
-        loadRecentDrivers();
-        loadDrivers();
-    }
+    list.innerHTML = online.map(driver => {
+        const state = driver.canReceiveTrips !== false ? 'online' : 'idle';
+        const seats = Number.isFinite(Number(driver.availableSeats)) ? `${driver.availableSeats} seats` : '';
+        return `
+            <div class="assign-driver-row" style="grid-template-columns: auto 1fr auto; cursor: pointer;" data-driver-id="${escapeAttr(driver.id)}" role="button" tabindex="0">
+                <span class="pin pin-driver-${state}" style="transform: none; border-radius: 50%; width: 10px; height: 10px; box-shadow: none; border: 0;"></span>
+                <div class="driver-main">
+                    <div class="driver-name">${escapeHtml(driver.name)}</div>
+                    <div class="driver-sub">${escapeHtml([driver.vehicleMake, driver.vehicleModel].filter(Boolean).join(' ') || '—')}</div>
+                </div>
+                <div class="text-sm">${escapeHtml(seats)}</div>
+            </div>`;
+    }).join('');
+    list.querySelectorAll('[data-driver-id]').forEach(el => {
+        el.addEventListener('click', () => openDriverModal(el.getAttribute('data-driver-id')));
+    });
 }
 
-function openDriverReport(id) {
-    const driver = drivers.find(d => d.id === id);
-    if (!driver) {
-        alert('Driver not found.');
+// ---------------- Driver modal (with tabs including trip history) ----------------
+async function openDriverModal(driverId) {
+    const driver = drivers.find(d => d.id === driverId);
+    if (!driver) return;
+    const modal = document.getElementById('driverModal');
+    const body = document.getElementById('driverModalBody');
+    if (!modal || !body) return;
+
+    body.innerHTML = renderDriverModalSkeleton(driver);
+
+    // Tab switching
+    body.querySelectorAll('.detail-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const name = tab.getAttribute('data-tab');
+            body.querySelectorAll('.detail-tab').forEach(t => t.classList.toggle('active', t === tab));
+            body.querySelectorAll('.detail-tab-content').forEach(c => c.classList.toggle('active', c.id === `tab-${name}`));
+        });
+    });
+
+    body.querySelectorAll('[data-driver-action]').forEach(btn => {
+        btn.addEventListener('click', () => onDriverActionClick(driver, btn.getAttribute('data-driver-action')));
+    });
+
+    modal.classList.add('active');
+    loadDriverTripHistory(driver.__docId || driver.id);
+}
+
+function renderDriverModalSkeleton(driver) {
+    return `
+        <div class="driver-modal-top">
+            <div class="driver-photo">${renderAvatar(driver.profilePhotoUrl, driver.name)}</div>
+            <div class="driver-heading">
+                <h3>${escapeHtml(driver.name)}</h3>
+                <small>${escapeHtml(driver.email)} · ${escapeHtml(driver.phone)}</small>
+                <div style="display:flex; gap:6px; margin-top:4px;">
+                    <span class="status-badge status-${driverStatusClass(driver.status)}">${escapeHtml(driver.status)}</span>
+                    ${driver.isOnline ? '<span class="badge badge-info">Online</span>' : ''}
+                    ${driver.canReceiveTrips !== false ? '' : '<span class="badge-neutral badge">Paused</span>'}
+                </div>
+            </div>
+            <div style="margin-inline-start:auto; display:flex; gap:6px;">
+                ${driver.status !== 'approved' ? `<button type="button" class="btn btn-sm btn-success" data-driver-action="approve">${escapeHtml(t('driver.approve', 'Approve'))}</button>` : ''}
+                ${driver.status !== 'rejected' ? `<button type="button" class="btn btn-sm btn-danger" data-driver-action="reject">${escapeHtml(t('driver.reject', 'Reject'))}</button>` : ''}
+            </div>
+        </div>
+
+        <div class="detail-tabs" role="tablist">
+            <button type="button" class="detail-tab active" data-tab="profile">${escapeHtml(t('driver.profile', 'Profile'))}</button>
+            <button type="button" class="detail-tab" data-tab="vehicle">${escapeHtml(t('driver.vehicle', 'Vehicle & License'))}</button>
+            <button type="button" class="detail-tab" data-tab="kyc">${escapeHtml(t('driver.kyc', 'KYC'))}</button>
+            <button type="button" class="detail-tab" data-tab="history">${escapeHtml(t('driver.history', 'Trip History'))}</button>
+        </div>
+
+        <div class="detail-tab-content active" id="tab-profile">
+            <div class="info-grid">
+                ${infoItem('First name', driver.firstName)}
+                ${infoItem('Last name', driver.lastName)}
+                ${infoItem('Gender', driver.gender)}
+                ${infoItem('Blood type', driver.bloodType)}
+                ${infoItem('Family status', driver.familyStatus)}
+                ${infoItem('National ID', driver.nationalId)}
+                ${infoItem('Date of birth', driver.dateOfBirth ? formatDate(driver.dateOfBirth) : '')}
+                ${infoItem('Wilaya', driver.wilaya)}
+                ${infoItem('Baladia', driver.baladia)}
+                ${infoItem('Address', driver.address)}
+                ${infoItem('Registered', formatDateTime(driver.registrationDate))}
+                ${infoItem('Available seats', driver.availableSeats)}
+            </div>
+        </div>
+
+        <div class="detail-tab-content" id="tab-vehicle">
+            <div class="info-grid">
+                ${infoItem('Make', driver.vehicleMake)}
+                ${infoItem('Model', driver.vehicleModel)}
+                ${infoItem('Year', driver.vehicleYear)}
+                ${infoItem('Color', driver.vehicleColor)}
+                ${infoItem('Plate', driver.vehiclePlate)}
+                ${infoItem('License number', driver.licenseNumber)}
+                ${infoItem('License category', driver.licenseCategory)}
+                ${infoItem('License expiry', driver.licenseExpiryDate ? formatDate(driver.licenseExpiryDate) : '')}
+            </div>
+            <div style="margin-top: 16px; display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+                ${renderLicenseImage('License front', driver.licenseFrontUrl)}
+                ${renderLicenseImage('License back', driver.licenseBackUrl)}
+            </div>
+        </div>
+
+        <div class="detail-tab-content" id="tab-kyc">
+            ${kycDoc('Grey card', driver.greyCardPhotoUrl, driver.greyCardRegistration, driver.greyCardVerified)}
+            ${kycDoc('Judicial record', driver.judicialRecordPhotoUrl, driver.judicialRecordIssueDate && 'Issued ' + formatDate(driver.judicialRecordIssueDate), driver.judicialRecordVerified)}
+            ${kycDoc('Medical certificate', driver.medicalCertPhotoUrl, driver.medicalCertDoctor || (driver.medicalCertIssueDate ? 'Issued ' + formatDate(driver.medicalCertIssueDate) : ''), driver.medicalCertVerified)}
+            ${driver.kycNotes ? `<div class="info-item" style="margin-top:12px;"><div class="info-label">Notes</div><div class="info-value">${escapeHtml(driver.kycNotes)}</div></div>` : ''}
+        </div>
+
+        <div class="detail-tab-content" id="tab-history">
+            <div id="tripHistoryContainer">
+                <div class="loading-row"><div class="loading-spinner"></div></div>
+            </div>
+        </div>
+    `;
+}
+
+function infoItem(label, value) {
+    const v = value == null || value === '' ? t('common.notAvailable', 'N/A') : value;
+    return `
+        <div class="info-item">
+            <div class="info-label">${escapeHtml(label)}</div>
+            <div class="info-value">${escapeHtml(String(v))}</div>
+        </div>`;
+}
+
+function renderLicenseImage(label, url) {
+    if (!url) {
+        return `<div class="info-item"><div class="info-label">${escapeHtml(label)}</div><div class="info-value text-muted">${escapeHtml(t('common.notAvailable', 'N/A'))}</div></div>`;
+    }
+    return `
+        <div class="info-item" style="padding:0; overflow:hidden;">
+            <img src="${escapeAttr(url)}" alt="${escapeAttr(label)}" style="width:100%; height:160px; object-fit:cover; border-radius: var(--r-md) var(--r-md) 0 0; background: var(--bg-app);" loading="lazy" onerror="this.remove();">
+            <div style="padding: 8px 12px;">
+                <div class="info-label">${escapeHtml(label)}</div>
+                <a href="${escapeAttr(url)}" target="_blank" rel="noopener">Open</a>
+            </div>
+        </div>`;
+}
+
+function kycDoc(label, url, subtitle, verified) {
+    const img = url
+        ? `<img src="${escapeAttr(url)}" alt="${escapeAttr(label)}" loading="lazy" onerror="this.style.display='none'">`
+        : `<div style="width:64px;height:64px;background:var(--bg-app);border-radius:var(--r-sm);display:grid;place-items:center;color:var(--text-muted);"><i class="fas fa-file"></i></div>`;
+    return `
+        <div class="kyc-doc">
+            ${img}
+            <div class="kyc-doc-stack">
+                <strong>${escapeHtml(label)}</strong>
+                ${subtitle ? `<small>${escapeHtml(subtitle)}</small>` : ''}
+                <span class="badge ${verified ? 'badge-approved' : 'badge-neutral'}" style="margin-top:4px; align-self:flex-start;">${verified ? 'Verified' : 'Unverified'}</span>
+            </div>
+            ${url ? `<a class="btn btn-sm" href="${escapeAttr(url)}" target="_blank" rel="noopener">Open</a>` : ''}
+        </div>
+    `;
+}
+
+async function loadDriverTripHistory(driverId) {
+    const container = document.getElementById('tripHistoryContainer');
+    if (!container) return;
+    const reqId = ++pendingTripHistoryReq;
+
+    if (!firestore || !driverId) {
+        container.innerHTML = renderTripHistoryList([]);
         return;
     }
     try {
-        sessionStorage.setItem('driverReport:' + id, JSON.stringify(driver));
-    } catch (e) {
-        console.warn('driver report cache', e);
+        const snap = await firestore
+            .collection('drivers').doc(driverId)
+            .collection('trip_history')
+            .orderBy('completedAt', 'desc')
+            .limit(50)
+            .get()
+            .catch(async () => {
+                // Fall back without orderBy if the index is missing
+                return firestore.collection('drivers').doc(driverId).collection('trip_history').limit(50).get();
+            });
+        if (reqId !== pendingTripHistoryReq) return; // stale
+        const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        items.sort((a, b) => {
+            const ta = toMillis(a.completedAt) || 0;
+            const tb = toMillis(b.completedAt) || 0;
+            return tb - ta;
+        });
+        container.innerHTML = renderTripHistoryList(items);
+    } catch (err) {
+        console.error('Failed to load trip_history:', err);
+        container.innerHTML = `
+            <div class="empty-state">
+                <i class="fas fa-triangle-exclamation"></i>
+                <h3>Failed to load trip history</h3>
+                <p>${escapeHtml(err.message || String(err))}</p>
+            </div>`;
     }
-    const url = 'driver-report.html?id=' + encodeURIComponent(id);
-    window.open(url, '_blank');
 }
 
-function toJsDate(value) {
-    if (value == null) return null;
-    if (typeof value.toDate === 'function') return value.toDate();
-    if (typeof value.toMillis === 'function') return new Date(value.toMillis());
-    if (value instanceof Date) return value;
-    const d = new Date(value);
-    return isNaN(d.getTime()) ? null : d;
+function toMillis(v) {
+    if (!v) return 0;
+    if (typeof v.toMillis === 'function') return v.toMillis();
+    if (typeof v.toDate === 'function') return v.toDate().getTime();
+    if (v instanceof Date) return v.getTime();
+    const n = Date.parse(v);
+    return Number.isFinite(n) ? n : 0;
 }
 
-function formatDate(dateString) {
-    const d = toJsDate(dateString);
-    if (!d) return 'N/A';
-    return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+function renderTripHistoryList(items) {
+    if (!items.length) {
+        return `
+            <div class="empty-state">
+                <i class="fas fa-clock-rotate-left"></i>
+                <h3>${escapeHtml(t('driver.noHistory', 'No completed trips yet.'))}</h3>
+            </div>`;
+    }
+    return `<div class="trip-history-list">${
+        items.map(trip => `
+            <div class="trip-history-item">
+                <div class="day-pill">${escapeHtml(trip.day || '—')}</div>
+                <div class="trip-body">
+                    <div class="trip-title">
+                        <i class="fas fa-child" style="color: var(--primary);"></i>
+                        ${escapeHtml(trip.childName || 'Child')}
+                        <span class="status-badge status-${rideStatusClass(trip.status || 'completed')}" style="margin-inline-start:auto;">${escapeHtml(trip.status || 'completed')}</span>
+                    </div>
+                    <div class="trip-route">
+                        <i class="fas fa-circle"></i> ${escapeHtml(trip.pickup || '—')}
+                        <span class="text-muted" style="margin: 0 4px;">→</span>
+                        <i class="fas fa-flag" style="color: var(--danger-500);"></i> ${escapeHtml(trip.dropoff || '—')}
+                    </div>
+                    <div class="trip-meta">
+                        <span><i class="fas fa-user"></i> ${escapeHtml(trip.parentName || '—')}</span>
+                        <span><i class="fas fa-clock"></i> ${escapeHtml(trip.pickupTime || '—')}</span>
+                        <span><i class="fas fa-calendar-check"></i> ${escapeHtml(formatDateTime(trip.completedAt))}</span>
+                    </div>
+                </div>
+            </div>
+        `).join('')
+    }</div>`;
 }
 
-function formatTime(value) {
-    const d = toJsDate(value);
-    return d ? d.toLocaleTimeString() : 'N/A';
-}
-
-function numFromCoord(v) {
-    if (v == null || v === '') return null;
-    const raw = typeof v === 'string' ? v.trim().replace(',', '.') : v;
-    const n = Number(raw);
-    return Number.isFinite(n) ? n : null;
-}
-
-/** Great-circle distance in km (WGS84 approximation) */
-function haversineKm(lat1, lon1, lat2, lon2) {
-    const R = 6371;
-    const toRad = (d) => (d * Math.PI) / 180;
-    const dLat = toRad(lat2 - lat1);
-    const dLon = toRad(lon2 - lon1);
-    const a =
-        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-}
-
-function getDriversSortedByPickup(pickupLat, pickupLng) {
-    const eligible = drivers.filter(d => d.isApproved === true && d.status !== 'rejected');
-    const pickupLatNum = numFromCoord(pickupLat);
-    const pickupLngNum = numFromCoord(pickupLng);
-    const hasPickup = pickupLatNum != null && pickupLngNum != null;
-    const rows = eligible.map(driver => {
-        let distKm = null;
-        if (hasPickup) {
-            const la = numFromCoord(
-                driver.locationLat ??
-                driver.startLocation?.lat ??
-                driver.startLocation?.latitude ??
-                driver.latitude ??
-                driver.currentLat ??
-                driver.currentLatitude ??
-                driver.lat
-            );
-            const ln = numFromCoord(
-                driver.locationLng ??
-                driver.startLocation?.lng ??
-                driver.startLocation?.longitude ??
-                driver.startLocation?.lon ??
-                driver.startLocation?.long ??
-                driver.longitude ??
-                driver.currentLng ??
-                driver.currentLongitude ??
-                driver.lng ??
-                driver.long ??
-                driver.lon
-            );
-            if (la != null && ln != null) {
-                distKm = haversineKm(pickupLatNum, pickupLngNum, la, ln);
-            }
+async function onDriverActionClick(driver, action) {
+    if (!isAdmin || !firestore) {
+        showToast({ title: t('toast.loginRequired', 'Only admins can perform this action.'), variant: 'error' });
+        return;
+    }
+    const docId = driver.__docId || driver.id;
+    const ref = firestore.collection('drivers').doc(docId);
+    try {
+        if (action === 'approve') {
+            await ref.update({ isApproved: true, status: 'approved', 'kyc.status': 'verified', 'kyc.reviewedAt': new Date().toISOString() });
+            showToast({ title: t('toast.approved', 'Driver approved'), variant: 'success' });
+        } else if (action === 'reject') {
+            await ref.update({ isApproved: false, status: 'rejected', 'kyc.status': 'rejected', 'kyc.reviewedAt': new Date().toISOString() });
+            showToast({ title: t('toast.rejected', 'Driver rejected'), variant: 'success' });
         }
-        return { driver, distKm };
-    });
-    rows.sort((a, b) => {
-        if (a.distKm == null && b.distKm == null) {
-            return String(a.driver.name || '').localeCompare(String(b.driver.name || ''), undefined, { sensitivity: 'base' });
-        }
-        if (a.distKm == null) return 1;
-        if (b.distKm == null) return -1;
-        return a.distKm - b.distKm;
-    });
-    return rows;
+        document.getElementById('driverModal')?.classList.remove('active');
+        refreshDataFromFirestore();
+    } catch (err) {
+        console.error(err);
+        showToast({ title: 'Action failed', body: err.message || '', variant: 'error' });
+    }
+}
+
+// ---------------- Assign driver modal (with scored list + map preview) ----------------
+function openAssignDriverModal(rideId) {
+    if (!isAdmin) {
+        showToast({ title: t('toast.loginRequired', 'Only admins can perform this action.'), variant: 'error' });
+    }
+    const ride = rides.find(r => r.id === rideId);
+    if (!ride) return;
+
+    const modal = document.getElementById('assignDriverModal');
+    modal?.setAttribute('data-ride-id', rideId);
+    const allowModify = document.getElementById('assignAllowModify');
+    if (allowModify) allowModify.checked = false;
+    const modifyWrap = document.getElementById('assignModifyWrap');
+    const alreadyAssigned = isRideAssigned(ride);
+    if (modifyWrap) modifyWrap.hidden = !alreadyAssigned;
+
+    const parentContact = getRideParentContact(ride);
+    const meta = document.getElementById('assignRideMeta');
+    let line = `<strong>${escapeHtml(getRideChildName(ride))}</strong> · ${escapeHtml(parentContact.name)} (${escapeHtml(parentContact.phone)})<br>
+                <span class="text-muted text-sm">${escapeHtml(ride.day)} · ${escapeHtml(ride.time)} · ${escapeHtml(ride.pickup)} → ${escapeHtml(ride.dropoff)}</span>`;
+    if (ride.pickupLat == null || ride.pickupLng == null) {
+        line += `<br><span class="badge badge-neutral">${escapeHtml(t('assign.noCoords', 'Pickup coordinates missing'))}</span>`;
+    }
+    if (alreadyAssigned) {
+        const currentDriver = drivers.find(d => String(d.id) === String(getRideAssignedDriverId(ride)));
+        const currentName = currentDriver?.name || ride.driverName || 'Assigned';
+        line += `<br><span class="badge badge-info">Current: ${escapeHtml(currentName)}</span>`;
+    }
+    if (meta) meta.innerHTML = line;
+
+    modal?.classList.add('active');
+    renderAssignDriverList(rideId);
 }
 
 function closeAssignDriverModal() {
@@ -1126,6 +1227,7 @@ function closeAssignDriverModal() {
     if (allowModify) allowModify.checked = false;
     const modifyWrap = document.getElementById('assignModifyWrap');
     if (modifyWrap) modifyWrap.hidden = true;
+    if (window.fleetMap) window.fleetMap.destroyAssignMap();
 }
 
 function isAssignModifyEnabled(rideId) {
@@ -1138,88 +1240,61 @@ function isAssignModifyEnabled(rideId) {
 function renderAssignDriverList(rideId) {
     const ride = rides.find(r => r.id === rideId);
     if (!ride) return;
-    const sorted = getDriversSortedByPickup(ride.pickupLat, ride.pickupLng);
+    const candidates = window.dispatcher
+        ? window.dispatcher.scoreCandidates(drivers, ride, rides)
+        : [];
     const el = document.getElementById('assignDriverList');
     if (!el) return;
     const assignedDriverId = getRideAssignedDriverId(ride);
     const alreadyAssigned = isRideAssigned(ride);
     const canModify = document.getElementById('assignAllowModify')?.checked === true;
     const locked = alreadyAssigned && !canModify;
-    if (!sorted.length) {
-        el.innerHTML = '<p class="assign-ride-meta">No approved drivers available.</p>';
-        return;
-    }
-    el.innerHTML = sorted
-        .map(({ driver, distKm }, index) => {
-            const distLabel = distKm == null ? '-' : `${distKm.toFixed(1)} km`;
-            const closest =
-                index === 0 && distKm != null
-                    ? ' <span class="status-badge status-approved" style="font-size:10px;vertical-align:middle;">Closest</span>'
-                    : '';
-            const isCurrent = assignedDriverId && String(driver.id) === String(assignedDriverId);
-            const currentTag = isCurrent
-                ? ' <span class="status-badge status-approved" style="font-size:10px;vertical-align:middle;">Current</span>'
-                : '';
-            let actionBtn = '';
-            if (isCurrent) {
-                actionBtn = `<button type="button" class="btn btn-sm btn-success" disabled>Assigned</button>`;
-            } else if (locked) {
-                actionBtn = `<button type="button" class="btn btn-sm btn-primary" disabled title="Enable modify checkbox to change driver">Assign</button>`;
-            } else {
-                const actionLabel = alreadyAssigned ? 'Change' : 'Assign';
-                actionBtn = `<button type="button" class="btn btn-sm btn-primary" data-assign-pick data-ride-id="${escapeAttr(ride.id)}" data-driver-id="${escapeAttr(driver.id)}">${actionLabel}</button>`;
-            }
-            return `
-        <div class="assign-driver-row">
-            <div class="driver-main">
-                <div class="driver-name">${escapeHtml(driver.name)}${closest}${currentTag}</div>
-                <div class="driver-sub">${escapeHtml(driver.phone)} | ${escapeHtml(driver.email)}</div>
-            </div>
-            <div class="dist">${distLabel}</div>
-            ${actionBtn}
-        </div>`;
-        })
-        .join('');
-}
 
-function openAssignDriverModal(rideId) {
-    if (!isAdmin) {
-        alert('Only admins can assign drivers.');
-        return;
-    }
-    const ride = rides.find(r => r.id === rideId);
-    if (!ride) {
-        alert('Ride not found.');
+    if (!candidates.length) {
+        el.innerHTML = `<div class="empty-state"><i class="fas fa-user-slash"></i><h3>${escapeHtml(t('assign.noDrivers', 'No approved drivers available.'))}</h3></div>`;
+        if (window.fleetMap) window.fleetMap.initAssignMap(ride, []);
         return;
     }
 
-    const modal = document.getElementById('assignDriverModal');
-    modal?.setAttribute('data-ride-id', rideId);
-    const allowModify = document.getElementById('assignAllowModify');
-    if (allowModify) allowModify.checked = false;
-    const modifyWrap = document.getElementById('assignModifyWrap');
+    el.innerHTML = candidates.map((c, index) => {
+        const driver = c.driver;
+        const isCurrent = assignedDriverId && String(driver.id) === String(assignedDriverId);
+        const topPick = index === 0;
+        const distLabel = c.distKm == null ? '—' : `${c.distKm.toFixed(1)} km`;
+        const chips = window.dispatcher
+            ? window.dispatcher.explainRow(c).map(chip => `<span class="chip">${escapeHtml(chip)}</span>`).join('')
+            : '';
+        const tags = [];
+        if (topPick) tags.push(`<span class="status-badge status-approved">${escapeHtml(t('assign.top', 'Top pick'))}</span>`);
+        if (isCurrent) tags.push(`<span class="status-badge status-scheduled">${escapeHtml(t('assign.current', 'Current'))}</span>`);
 
-    const assignedDriverId = getRideAssignedDriverId(ride);
-    const alreadyAssigned = isRideAssigned(ride);
-    if (modifyWrap) modifyWrap.hidden = !alreadyAssigned;
+        let actionBtn;
+        if (isCurrent) {
+            actionBtn = `<button type="button" class="btn btn-sm btn-success" disabled>${escapeHtml(t('assign.assigned', 'Assigned'))}</button>`;
+        } else if (locked) {
+            actionBtn = `<button type="button" class="btn btn-sm btn-primary" disabled title="Enable modify">${escapeHtml(t('assign.assign', 'Assign'))}</button>`;
+        } else {
+            const label = alreadyAssigned ? t('assign.change', 'Change') : t('assign.assign', 'Assign');
+            actionBtn = `<button type="button" class="btn btn-sm btn-primary" data-assign-pick data-ride-id="${escapeAttr(ride.id)}" data-driver-id="${escapeAttr(driver.id)}">${escapeHtml(label)}</button>`;
+        }
 
-    const meta = document.getElementById('assignRideMeta');
-    const parentContact = getRideParentContact(ride);
-    let line = `Child: ${ride.childName} | Parent: ${parentContact.name} (${parentContact.phone}) | Pickup: ${ride.pickup}`;
-    if (ride.pickupLat != null && ride.pickupLng != null) {
-        line += ` | Pickup coordinates: ${Number(ride.pickupLat).toFixed(5)}, ${Number(ride.pickupLng).toFixed(5)}`;
-    } else {
-        line += ' | Pickup coordinates missing - distances unavailable (drivers sorted A-Z).';
-    }
-    if (alreadyAssigned) {
-        const currentDriver = drivers.find(d => String(d.id) === String(assignedDriverId));
-        const currentName = currentDriver?.name || ride.driverName || 'Assigned';
-        line += ` | Current driver: ${currentName} | Locked: check "Enable modifying driver for this trip" to change.`;
-    }
-    meta.textContent = line;
+        return `
+            <div class="assign-driver-row ${topPick ? 'top-pick' : ''}">
+                <div class="cell-avatar">${renderAvatar(driver.profilePhotoUrl, driver.name)}</div>
+                <div class="driver-main">
+                    <div class="driver-name">${escapeHtml(driver.name)} ${tags.join(' ')}</div>
+                    <div class="driver-sub">${escapeHtml(driver.phone)} · ${escapeHtml([driver.vehicleMake, driver.vehicleModel].filter(Boolean).join(' ') || '—')}</div>
+                    <div class="driver-explain">${chips}</div>
+                </div>
+                <div>
+                    <div class="dist">${escapeHtml(distLabel)}</div>
+                    <div class="score-bar" title="Score ${Math.round(c.score * 100)}%"><div style="width: ${Math.round(c.score * 100)}%"></div></div>
+                </div>
+                ${actionBtn}
+            </div>`;
+    }).join('');
 
-    renderAssignDriverList(rideId);
-    document.getElementById('assignDriverModal').classList.add('active');
+    if (window.fleetMap) window.fleetMap.initAssignMap(ride, candidates);
 }
 
 async function assignDriverToRide(rideId, driverId) {
@@ -1227,82 +1302,77 @@ async function assignDriverToRide(rideId, driverId) {
     const ride = rides.find(r => r.id === rideId);
     const driver = drivers.find(d => d.id === driverId);
     if (!ride || !driver) {
-        alert('Ride or driver not found.');
+        showToast({ title: 'Ride or driver not found.', variant: 'error' });
         return;
     }
     const existingDriverId = getRideAssignedDriverId(ride);
     const isReassign = Boolean(existingDriverId) && String(existingDriverId) !== String(driver.id);
     const modifyEnabled = isAssignModifyEnabled(rideId);
     if (isReassign && !modifyEnabled) {
-        alert('This trip already has a driver. Check "Enable modifying driver for this trip" to change it.');
+        showToast({ title: 'Enable modify to change driver.', variant: 'warn' });
         return;
     }
     if (existingDriverId && String(existingDriverId) === String(driver.id)) {
-        alert('This driver is already assigned to this trip.');
+        showToast({ title: 'Driver already assigned.', variant: 'warn' });
         return;
     }
     if (!driver.isApproved || driver.status === 'rejected') {
-        alert('Only approved drivers can be assigned.');
+        showToast({ title: 'Only approved drivers can be assigned.', variant: 'error' });
         return;
     }
     if (typeof driver.availableSeats === 'number' && driver.availableSeats <= 0) {
-        alert('This driver has no available seats.');
+        showToast({ title: 'Driver has no available seats.', variant: 'error' });
         return;
     }
-    const confirmText = isReassign
-        ? `Change driver to ${driver.name} for ${ride.childName}?`
-        : `Assign ${driver.name} to this ride for ${ride.childName}?`;
-    if (!confirm(confirmText)) return;
 
-   if (isAdmin && firestore) {
+    if (!isAdmin || !firestore) {
+        // Sample/offline mode: mutate in place
+        const previousDriverId = existingDriverId;
+        ride.driverId = driverId;
+        ride.driverName = driver.name;
+        ride.status = 'accepted';
+        if (typeof driver.availableSeats === 'number') {
+            driver.availableSeats = Math.max(0, driver.availableSeats - 1);
+        }
+        if (previousDriverId && previousDriverId !== driverId) {
+            const prev = drivers.find(d => d.id === previousDriverId);
+            if (prev && typeof prev.availableSeats === 'number') prev.availableSeats += 1;
+        }
+        showToast({ title: t('toast.assigned', 'Driver assigned'), variant: 'success' });
+        closeAssignDriverModal();
+        renderAll();
+        return;
+    }
+
     try {
         const driverDocId = String(driver.__docId || driver.id).trim();
         const acceptedAt = new Date().toISOString();
-
-        // ─── 1. اجلب parentId و childId من ride ───────────────────
-        // ride لازم يحتوي على parentId و childId
-        // راجع fetchDataFromFirestore وأضفهم (شوف الملاحظة أسفل)
         const parentId = ride.parentId;
         const childId = ride.childId;
         const day = ride.day;
         const tripIndex = Number(ride.tripIndex);
 
-        if (!parentId || !childId || !day) {
-            alert('Missing parentId / childId / day on this ride. Check fetch logic.');
-            return;
-        }
-        if (!Number.isInteger(tripIndex)) {
-            alert('Trip index is missing. Please refresh and try again.');
+        if (!parentId || !childId || !day || !Number.isInteger(tripIndex)) {
+            showToast({ title: 'Missing ride identifiers.', variant: 'error' });
             return;
         }
 
         await firestore.runTransaction(async (tx) => {
-
-            // ─── 2. schedules document ────────────────────────────
             const scheduleRef = firestore
                 .collection('parents').doc(parentId)
                 .collection('children').doc(childId)
                 .collection('schedules').doc(day);
-
             const driverRef = firestore.collection('drivers').doc(driverDocId);
 
-            const [scheduleSnap, driverSnap] = await Promise.all([
-                tx.get(scheduleRef),
-                tx.get(driverRef)
-            ]);
-
+            const [scheduleSnap, driverSnap] = await Promise.all([tx.get(scheduleRef), tx.get(driverRef)]);
             if (!scheduleSnap.exists) throw new Error('Schedule document not found.');
-            if (!driverSnap.exists)   throw new Error('Driver not found.');
+            if (!driverSnap.exists)  throw new Error('Driver not found.');
 
-            // ─── 3. تحديث trips array ─────────────────────────────
             const trips = (scheduleSnap.data().trips || []).slice();
             const trip = trips[tripIndex];
             if (!trip || typeof trip !== 'object') throw new Error('Trip item not found.');
 
-            const currentTripDriverId = String(
-                trip.assignedDriverId || trip.driverId || ''
-            ).trim();
-
+            const currentTripDriverId = String(trip.assignedDriverId || trip.driverId || '').trim();
             if (currentTripDriverId && currentTripDriverId === driverDocId) {
                 throw new Error('This driver is already assigned to this trip.');
             }
@@ -1315,19 +1385,15 @@ async function assignDriverToRide(rideId, driverId) {
                 driverId: driverDocId,
                 assignedDriverId: driverDocId,
                 status: 'accepted',
-                isAssignedDriver: true
+                isAssignedDriver: true,
             };
 
-            // ─── 4. availableSeats ────────────────────────────────
             const driverData = driverSnap.data() || {};
-            const currentSeats = Number(
-                driverData.availableSeats != null ? driverData.availableSeats : driverData.capacity
-            );
+            const currentSeats = Number(driverData.availableSeats != null ? driverData.availableSeats : driverData.capacity);
             if (!Number.isFinite(currentSeats) || currentSeats <= 0) {
                 throw new Error('Driver has no available seats.');
             }
 
-            // السائق السابق (إن وُجد)
             let previousDriverRef = null;
             let previousDriverSnap = null;
             if (currentTripDriverId && currentTripDriverId !== driverDocId) {
@@ -1338,111 +1404,97 @@ async function assignDriverToRide(rideId, driverId) {
                 ? Number(previousDriverSnap.data()?.availableSeats ?? NaN)
                 : NaN;
 
-            // ─── 5. اكتب كل التغييرات ─────────────────────────────
-            tx.update(scheduleRef, { trips });                              // ← schedules
-            tx.update(driverRef, { availableSeats: currentSeats - 1 });    // ← driver جديد
+            tx.update(scheduleRef, { trips });
+            tx.update(driverRef, { availableSeats: currentSeats - 1 });
             if (previousDriverRef && previousDriverSnap?.exists) {
                 tx.update(previousDriverRef, {
-                    availableSeats: Number.isFinite(previousSeats) ? previousSeats + 1 : 1
+                    availableSeats: Number.isFinite(previousSeats) ? previousSeats + 1 : 1,
                 });
             }
         });
 
-        // ─── 6. Create trip_requests document (like kidtaxi-admin) ────────
         try {
-     const tripRequest = {
-    acceptedAt: acceptedAt,
-    childId: childId,
-    childSnapshot: {
-        age: ride.childAge || null,
-        fullName: ride.childName || '',
-        photoUrl: ride.childPhotoUrl || null,
-    },
-    createdAt: new Date().toISOString(),
-    day: day,
-    driverId: driverDocId,
-    dropoff: ride.dropoff || '',
-    parentId: parentId,
-    parentSnapshot: {
-        fullName: ride.parentName || '',
-        phone: ride.parentPhone || '',
-    },
-    pickup: ride.pickup || '',
-    pickupTime: ride.time || '',
-    tripIndex: tripIndex,
-    status: 'accepted',
-    pickupLocation: ride.pickupLocationFull || {},
-    dropoffLocation: ride.dropoffLocationFull || {},
-    idTrip: ride.idTrip || '',
-    type: ride.tripType || 'other',
-    from: ride.fromLabel || ride.pickup || '',
-    to: ride.toLabel || ride.dropoff || '',
-    isPaused: ride.isPaused || false,
-    isActive: ride.isScheduleActive !== false,
-};
-
-            // Add document to trip_requests collection
+            const tripRequest = {
+                acceptedAt,
+                childId,
+                childSnapshot: {
+                    age: ride.childAge || null,
+                    fullName: ride.childName || '',
+                    photoUrl: ride.childPhotoUrl || null,
+                },
+                createdAt: new Date().toISOString(),
+                day,
+                driverId: driverDocId,
+                dropoff: ride.dropoff || '',
+                parentId,
+                parentSnapshot: {
+                    fullName: ride.parentName || '',
+                    phone: ride.parentPhone || '',
+                },
+                pickup: ride.pickup || '',
+                pickupTime: ride.time || '',
+                tripIndex,
+                status: 'accepted',
+                pickupLocation: ride.pickupLocationFull || {},
+                dropoffLocation: ride.dropoffLocationFull || {},
+                idTrip: ride.idTrip || '',
+                type: ride.tripType || 'other',
+                from: ride.fromLabel || ride.pickup || '',
+                to: ride.toLabel || ride.dropoff || '',
+                isPaused: ride.isPaused || false,
+                isActive: ride.isScheduleActive !== false,
+            };
             const docRef = await firestore.collection('trip_requests').add(tripRequest);
-            // Set the document ID in the document itself
             await docRef.update({ id: docRef.id });
         } catch (tripReqErr) {
-            console.warn('Warning: Failed to create trip_request document:', tripReqErr);
-            // Don't fail the entire assignment if trip_requests creation fails
+            console.warn('Failed to create trip_request document:', tripReqErr);
         }
 
+        showToast({ title: t('toast.assigned', 'Driver assigned'), variant: 'success' });
         closeAssignDriverModal();
         await refreshDataFromFirestore();
-
     } catch (err) {
         console.error(err);
-        alert('Failed to assign driver: ' + (err.message || 'Check Firestore rules.'));
+        showToast({ title: t('toast.assignFailed', 'Failed to assign driver'), body: err.message || '', variant: 'error' });
     }
-
-} else {
-    // === Offline / sample data fallback (لا تغيير) ===
-    const previousDriverId = getRideAssignedDriverId(ride);
-    ride.driverId = driverId;
-    ride.driverName = driver.name;
-    ride.status = 'accepted';
-    if (typeof driver.availableSeats === 'number') {
-        driver.availableSeats = Math.max(0, driver.availableSeats - 1);
-    }
-    if (previousDriverId && previousDriverId !== driverId) {
-        const previousDriver = drivers.find(d => String(d.id) === String(previousDriverId));
-        if (previousDriver && typeof previousDriver.availableSeats === 'number') {
-            previousDriver.availableSeats += 1;
-        }
-    }
-    closeAssignDriverModal();
-    loadRides();
-    loadRecentRides();
-}
 }
 
-/** When label is missing or still "Detecting place...", show lat/lng instead */
-function formatPlaceLabel(place, fallback) {
-    if (!place || typeof place !== 'object') return fallback;
-    const raw = typeof place.label === 'string' ? place.label.trim() : '';
-    const isPlaceholder =
-        !raw ||
-        /^detecting\s*place/i.test(raw) ||
-        /^select/i.test(raw) ||
-        /^loading/i.test(raw) ||
-        raw === '...';
-    if (!isPlaceholder) return raw;
+// ---------------- Dispatch settings sliders ----------------
+function setupDispatchSettingsUI() {
+    const fields = [
+        ['wDistance',  'distance'],
+        ['wLocality',  'locality'],
+        ['wRating',    'rating'],
+        ['wFreshness', 'freshness'],
+        ['wWorkload',  'workload'],
+    ];
+    if (!window.dispatcher) return;
 
-    const lat = place.lat;
-    const lng = place.lng;
-    const la = typeof lat === 'number' ? lat : lat != null ? Number(lat) : NaN;
-    const ln = typeof lng === 'number' ? lng : lng != null ? Number(lng) : NaN;
-    if (Number.isFinite(la) && Number.isFinite(ln)) {
-        return `${la.toFixed(5)}, ${ln.toFixed(5)}`;
-    }
-    return raw || fallback;
+    const weights = window.dispatcher.getWeights();
+    const total = Object.values(weights).reduce((s, v) => s + v, 0) || 1;
+    fields.forEach(([inputId, key]) => {
+        const input = document.getElementById(inputId);
+        if (!input) return;
+        const pct = Math.round((weights[key] / total) * 100);
+        input.value = pct;
+        const valEl = document.getElementById(`${inputId}Val`);
+        if (valEl) valEl.textContent = `${pct}%`;
+        input.addEventListener('input', () => {
+            if (valEl) valEl.textContent = `${input.value}%`;
+            persistDispatchWeights();
+        });
+    });
 }
 
-window.approveDriver = approveDriver;
-window.openDriverReport = openDriverReport;
-
-
-
+function persistDispatchWeights() {
+    if (!window.dispatcher) return;
+    const next = {
+        distance:  Number(document.getElementById('wDistance')?.value || 0) / 100,
+        locality:  Number(document.getElementById('wLocality')?.value || 0) / 100,
+        rating:    Number(document.getElementById('wRating')?.value || 0) / 100,
+        freshness: Number(document.getElementById('wFreshness')?.value || 0) / 100,
+        workload:  Number(document.getElementById('wWorkload')?.value || 0) / 100,
+    };
+    window.dispatcher.saveWeights(next);
+    renderDispatchPage();
+}

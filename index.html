@@ -1,61 +1,71 @@
-// this is newwer version
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" dir="ltr" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Dashboard - Driver App</title>
-    <link rel="stylesheet" href="styles.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <title>Taxi for Kids — Admin Dashboard</title>
+    <meta name="color-scheme" content="light dark">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet">
+
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin=""/>
+    <link rel="stylesheet" href="styles.css">
 </head>
 <body>
     <div class="dashboard-container">
+
         <!-- Sidebar -->
-        <aside class="sidebar" id="sidebar">
+        <aside class="sidebar" id="sidebar" aria-label="Main navigation">
             <div class="sidebar-header">
                 <div class="logo">
-                    <i class="fas fa-car"></i>
-                    <span>Admin Panel</span>
+                    <i class="fas fa-taxi" aria-hidden="true"></i>
+                    <span data-i18n="appName">Taxi for Kids</span>
                 </div>
-                <button class="sidebar-toggle" id="sidebarToggle">
+                <button type="button" class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle sidebar">
                     <i class="fas fa-bars"></i>
                 </button>
             </div>
-            <nav class="sidebar-nav">
-                <a href="#" class="nav-item active" data-page="dashboard">
-                    <i class="fas fa-home"></i>
-                    <span>Dashboard</span>
+            <nav class="sidebar-nav" aria-label="Pages">
+                <a href="#dashboard" class="nav-item active" data-page="dashboard">
+                    <i class="fas fa-gauge-high"></i>
+                    <span data-i18n="nav.dashboard">Dashboard</span>
                 </a>
-                <a href="#" class="nav-item" data-page="drivers">
-                    <i class="fas fa-users"></i>
-                    <span>Drivers</span>
-                    <span class="badge" id="pendingDriversBadge">0</span>
+                <a href="#drivers" class="nav-item" data-page="drivers">
+                    <i class="fas fa-id-card"></i>
+                    <span data-i18n="nav.drivers">Drivers</span>
+                    <span class="badge" id="pendingDriversBadge" data-count="0">0</span>
                 </a>
-                <a href="#" class="nav-item" data-page="rides">
+                <a href="#rides" class="nav-item" data-page="rides">
                     <i class="fas fa-route"></i>
-                    <span>Rides</span>
+                    <span data-i18n="nav.rides">Rides</span>
                 </a>
-                <a href="#" class="nav-item" data-page="children">
+                <a href="#dispatch" class="nav-item" data-page="dispatch">
+                    <i class="fas fa-map-location-dot"></i>
+                    <span data-i18n="nav.dispatch">Dispatch</span>
+                </a>
+                <a href="#children" class="nav-item" data-page="children">
                     <i class="fas fa-child"></i>
-                    <span>Children</span>
+                    <span data-i18n="nav.children">Children</span>
                 </a>
-                <a href="#" class="nav-item" data-page="settings">
-                    <i class="fas fa-cog"></i>
-                    <span>Settings</span>
+                <a href="#settings" class="nav-item" data-page="settings">
+                    <i class="fas fa-sliders"></i>
+                    <span data-i18n="nav.settings">Settings</span>
                 </a>
             </nav>
             <div class="sidebar-footer">
                 <div class="user-info">
-                    <div class="user-avatar">
-                        <i class="fas fa-user"></i>
-                    </div>
+                    <div class="user-avatar"><i class="fas fa-user-shield"></i></div>
                     <div class="user-details">
-                        <span class="user-name">Admin User</span>
-                        <span class="user-role">Administrator</span>
+                        <span class="user-name" id="sidebarUserName" data-i18n="auth.guest">Guest</span>
+                        <span class="user-role" id="sidebarUserRole" data-i18n="auth.signInToContinue">Sign in to continue</span>
                     </div>
                 </div>
-                <button type="button" class="logout-btn" id="logoutBtn" title="Log out" aria-label="Log out">
+                <button type="button" class="logout-btn" id="logoutBtn" title="Log out" aria-label="Log out" hidden>
                     <i class="fas fa-sign-out-alt"></i>
                 </button>
             </div>
@@ -66,64 +76,96 @@
             <!-- Top Bar -->
             <header class="top-bar">
                 <div class="top-bar-left">
-                    <h1 class="page-title" id="pageTitle">Dashboard</h1>
+                    <h1 class="page-title" id="pageTitle" data-i18n="nav.dashboard">Dashboard</h1>
                 </div>
                 <div class="top-bar-right">
-                    <button class="icon-btn" id="notificationsBtn">
-                        <i class="fas fa-bell"></i>
-                        <span class="notification-dot"></span>
+                    <button type="button" class="icon-btn" id="langToggle" aria-label="Toggle language" title="Toggle language">
+                        <span id="langToggleLabel">ع</span>
                     </button>
-                    <button type="button" class="btn" id="emailLoginBtn" title="Login with Email">
-                        <i class="fas fa-envelope"></i> Email Login
-                    </button>
-                    <button type="button" class="btn" id="signInBtn">Sign In</button>
-                    <button type="button" class="btn btn-logout" id="logoutTopBtn" hidden>Log out</button>
-                    <button type="button" class="icon-btn" id="themeToggle">
+                    <button type="button" class="icon-btn" id="themeToggle" aria-label="Toggle theme" title="Toggle theme">
                         <i class="fas fa-moon"></i>
                     </button>
+                    <button type="button" class="icon-btn" id="notificationsBtn" aria-label="Notifications" title="Notifications">
+                        <i class="fas fa-bell"></i>
+                        <span class="notification-dot" hidden></span>
+                    </button>
+                    <button type="button" class="btn" id="emailLoginBtn" title="Login with Email">
+                        <i class="fas fa-envelope"></i> <span class="btn-text-long" data-i18n="auth.emailLogin">Email Login</span>
+                    </button>
+                    <button type="button" class="btn btn-primary" id="signInBtn" data-i18n="auth.signIn">Sign In</button>
+                    <button type="button" class="btn btn-logout" id="logoutTopBtn" hidden data-i18n="auth.logout">Log out</button>
                 </div>
             </header>
 
             <!-- Page Content -->
             <div class="page-content" id="pageContent">
+
                 <!-- Dashboard Page -->
                 <div class="page" id="dashboardPage">
                     <!-- Stats Cards -->
                     <div class="stats-grid">
                         <div class="stat-card" data-page="drivers" data-driver-filter="all" role="button" tabindex="0" aria-label="Open drivers tab">
-                            <div class="stat-icon" style="background: rgba(25, 118, 210, 0.1); color: #1976D2;">
-                                <i class="fas fa-users"></i>
+                            <div class="stat-icon" style="background: rgba(29, 69, 153, 0.12); color: var(--primary);">
+                                <i class="fas fa-id-card"></i>
                             </div>
                             <div class="stat-info">
                                 <h3 class="stat-value" id="totalDrivers">0</h3>
-                                <p class="stat-label">Total Drivers</p>
+                                <p class="stat-label" data-i18n="kpi.totalDrivers">Total Drivers</p>
                             </div>
                         </div>
                         <div class="stat-card" data-page="drivers" data-driver-filter="pending" role="button" tabindex="0" aria-label="Open pending drivers">
-                            <div class="stat-icon" style="background: rgba(255, 179, 0, 0.1); color: #FFB300;">
+                            <div class="stat-icon" style="background: rgba(245, 158, 11, 0.12); color: var(--warning-500);">
                                 <i class="fas fa-user-clock"></i>
                             </div>
                             <div class="stat-info">
                                 <h3 class="stat-value" id="pendingDrivers">0</h3>
-                                <p class="stat-label">Pending Approval</p>
+                                <p class="stat-label" data-i18n="kpi.pendingApproval">Pending Approval</p>
                             </div>
                         </div>
                         <div class="stat-card" data-page="rides" role="button" tabindex="0" aria-label="Open rides tab">
-                            <div class="stat-icon" style="background: rgba(76, 175, 80, 0.1); color: #4CAF50;">
+                            <div class="stat-icon" style="background: rgba(22, 163, 74, 0.12); color: var(--success-500);">
                                 <i class="fas fa-route"></i>
                             </div>
                             <div class="stat-info">
                                 <h3 class="stat-value" id="totalRides">0</h3>
-                                <p class="stat-label">Total Rides</p>
+                                <p class="stat-label" data-i18n="kpi.totalRides">Total Rides</p>
                             </div>
                         </div>
                         <div class="stat-card" data-page="children" role="button" tabindex="0" aria-label="Open children tab">
-                            <div class="stat-icon" style="background: rgba(211, 47, 47, 0.1); color: #D32F2F;">
+                            <div class="stat-icon" style="background: rgba(220, 38, 38, 0.12); color: var(--danger-500);">
                                 <i class="fas fa-child"></i>
                             </div>
                             <div class="stat-info">
                                 <h3 class="stat-value" id="totalChildren">0</h3>
-                                <p class="stat-label">Active Children</p>
+                                <p class="stat-label" data-i18n="kpi.activeChildren">Active Children</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Map + online drivers -->
+                    <div class="content-grid map-grid">
+                        <div class="card">
+                            <div class="card-header">
+                                <h2 data-i18n="dashboard.liveFleetMap">Live Fleet Map</h2>
+                                <span class="text-sm text-muted" id="fleetMapSummary">—</span>
+                            </div>
+                            <div class="card-body p-0">
+                                <div id="fleetMap" class="fleet-map" aria-label="Live fleet map">
+                                    <div class="map-legend" role="note">
+                                        <span><span class="dot online"></span><span data-i18n="map.online">Online</span></span>
+                                        <span><span class="dot idle"></span><span data-i18n="map.idle">Idle</span></span>
+                                        <span><span class="dot offline"></span><span data-i18n="map.offline">Offline</span></span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <div class="card-header">
+                                <h2 data-i18n="dashboard.onlineDrivers">Online Drivers</h2>
+                                <span class="text-sm text-muted" id="onlineDriversCount">0</span>
+                            </div>
+                            <div class="card-body" id="onlineDriversList" style="max-height: 420px; overflow-y: auto; padding: 8px 12px;">
+                                <!-- populated by JS -->
                             </div>
                         </div>
                     </div>
@@ -132,24 +174,21 @@
                     <div class="content-grid">
                         <div class="card">
                             <div class="card-header">
-                                <h2>Recent Drivers</h2>
-                                <a href="#" class="view-all" data-page="drivers">View All</a>
+                                <h2 data-i18n="dashboard.recentDrivers">Recent Drivers</h2>
+                                <a href="#drivers" class="view-all" data-page="drivers" data-i18n="common.viewAll">View All</a>
                             </div>
-                            <div class="card-body">
+                            <div class="card-body p-0">
                                 <div class="table-responsive">
                                     <table class="data-table">
                                         <thead>
                                             <tr>
-                                                <th>Name</th>
-                                                <th>Email</th>
-                                                <th>Status</th>
-                                                <th>Date</th>
-                                                <th>Actions</th>
+                                                <th data-i18n="table.name">Name</th>
+                                                <th data-i18n="table.status">Status</th>
+                                                <th data-i18n="table.date">Date</th>
+                                                <th></th>
                                             </tr>
                                         </thead>
-                                        <tbody id="recentDriversTable">
-                                            <!-- Populated by JavaScript -->
-                                        </tbody>
+                                        <tbody id="recentDriversTable"></tbody>
                                     </table>
                                 </div>
                             </div>
@@ -157,26 +196,22 @@
 
                         <div class="card">
                             <div class="card-header">
-                                <h2>Recent Rides</h2>
-                                <a href="#" class="view-all" data-page="rides">View All</a>
+                                <h2 data-i18n="dashboard.recentRides">Recent Rides</h2>
+                                <a href="#rides" class="view-all" data-page="rides" data-i18n="common.viewAll">View All</a>
                             </div>
-                            <div class="card-body">
+                            <div class="card-body p-0">
                                 <div class="table-responsive">
                                     <table class="data-table">
                                         <thead>
                                             <tr>
-                                                <th>Child</th>
-                                                <th>Day</th>
-                                                <th>Driver</th>
-                                                <th>Pickup</th>
-                                                <th>Dropoff</th>
-                                                <th>Status</th>
-                                                <th>Time</th>
+                                                <th data-i18n="table.child">Child</th>
+                                                <th data-i18n="table.day">Day</th>
+                                                <th data-i18n="table.driver">Driver</th>
+                                                <th data-i18n="table.status">Status</th>
+                                                <th data-i18n="table.time">Time</th>
                                             </tr>
                                         </thead>
-                                        <tbody id="recentRidesTable">
-                                            <!-- Populated by JavaScript -->
-                                        </tbody>
+                                        <tbody id="recentRidesTable"></tbody>
                                     </table>
                                 </div>
                             </div>
@@ -185,36 +220,34 @@
                 </div>
 
                 <!-- Drivers Page -->
-                <div class="page" id="driversPage" style="display: none;">
+                <div class="page" id="driversPage" hidden>
                     <div class="page-header">
                         <div class="search-box">
                             <i class="fas fa-search"></i>
-                            <input type="text" id="driverSearch" placeholder="Search drivers...">
+                            <input type="text" id="driverSearch" placeholder="Search drivers..." data-i18n-placeholder="search.drivers">
                         </div>
-                        <div class="filter-buttons">
-                            <button class="filter-btn active" data-filter="all">All</button>
-                            <button class="filter-btn" data-filter="pending">Pending</button>
-                            <button class="filter-btn" data-filter="approved">Approved</button>
-                            <button class="filter-btn" data-filter="rejected">Rejected</button>
+                        <div class="filter-buttons" role="tablist" aria-label="Driver status filter">
+                            <button type="button" class="filter-btn active" data-filter="all" data-i18n="filter.all">All</button>
+                            <button type="button" class="filter-btn" data-filter="pending" data-i18n="filter.pending">Pending</button>
+                            <button type="button" class="filter-btn" data-filter="approved" data-i18n="filter.approved">Approved</button>
+                            <button type="button" class="filter-btn" data-filter="rejected" data-i18n="filter.rejected">Rejected</button>
                         </div>
                     </div>
                     <div class="card">
-                        <div class="card-body">
+                        <div class="card-body p-0">
                             <div class="table-responsive">
                                 <table class="data-table">
                                     <thead>
                                         <tr>
-                                            <th>Name</th>
-                                            <th>Email</th>
-                                            <th>Phone</th>
-                                            <th>Status</th>
-                                            <th>Registration Date</th>
-                                            <th>Actions</th>
+                                            <th data-i18n="table.name">Name</th>
+                                            <th data-i18n="table.contact">Contact</th>
+                                            <th data-i18n="table.vehicle">Vehicle</th>
+                                            <th data-i18n="table.status">Status</th>
+                                            <th data-i18n="table.registration">Registered</th>
+                                            <th></th>
                                         </tr>
                                     </thead>
-                                    <tbody id="driversTable">
-                                        <!-- Populated by JavaScript -->
-                                    </tbody>
+                                    <tbody id="driversTable"></tbody>
                                 </table>
                             </div>
                         </div>
@@ -222,32 +255,63 @@
                 </div>
 
                 <!-- Rides Page -->
-                <div class="page" id="ridesPage" style="display: none;">
+                <div class="page" id="ridesPage" hidden>
                     <div class="page-header">
                         <div class="search-box">
                             <i class="fas fa-search"></i>
-                            <input type="text" id="rideSearch" placeholder="Search rides...">
+                            <input type="text" id="rideSearch" placeholder="Search rides..." data-i18n-placeholder="search.rides">
+                        </div>
+                        <div class="filter-buttons" role="tablist" aria-label="Ride status filter">
+                            <button type="button" class="filter-btn active" data-ride-filter="all" data-i18n="filter.all">All</button>
+                            <button type="button" class="filter-btn" data-ride-filter="pending" data-i18n="filter.pending">Pending</button>
+                            <button type="button" class="filter-btn" data-ride-filter="accepted" data-i18n="filter.accepted">Accepted</button>
+                            <button type="button" class="filter-btn" data-ride-filter="completed" data-i18n="filter.completed">Completed</button>
                         </div>
                     </div>
                     <div class="card">
-                        <div class="card-body">
+                        <div class="card-body p-0">
                             <div class="table-responsive">
                                 <table class="data-table">
                                     <thead>
                                         <tr>
-                                            <th>Child</th>
-                                            <th>Day</th>
-                                            <th>Driver</th>
-                                            <th>Pickup</th>
-                                            <th>Dropoff</th>
-                                            <th>Time</th>
-                                            <th>Status</th>
-                                            <th>Actions</th>
+                                            <th data-i18n="table.child">Child</th>
+                                            <th data-i18n="table.day">Day</th>
+                                            <th data-i18n="table.driver">Driver</th>
+                                            <th data-i18n="table.pickup">Pickup</th>
+                                            <th data-i18n="table.dropoff">Dropoff</th>
+                                            <th data-i18n="table.time">Time</th>
+                                            <th data-i18n="table.status">Status</th>
+                                            <th></th>
                                         </tr>
                                     </thead>
-                                    <tbody id="ridesTable">
-                                        <!-- Populated by JavaScript -->
-                                    </tbody>
+                                    <tbody id="ridesTable"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Dispatch Page -->
+                <div class="page" id="dispatchPage" hidden>
+                    <div class="page-header">
+                        <h2 data-i18n="dispatch.title" style="font-size: 16px; font-weight:600;">Unassigned rides</h2>
+                        <span class="text-sm text-muted" id="dispatchSummary">—</span>
+                    </div>
+                    <div class="card">
+                        <div class="card-body p-0">
+                            <div class="table-responsive">
+                                <table class="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th data-i18n="table.child">Child</th>
+                                            <th data-i18n="table.day">Day</th>
+                                            <th data-i18n="table.pickup">Pickup</th>
+                                            <th data-i18n="table.time">Time</th>
+                                            <th data-i18n="dispatch.topSuggestion">Top suggestion</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="dispatchTable"></tbody>
                                 </table>
                             </div>
                         </div>
@@ -255,28 +319,26 @@
                 </div>
 
                 <!-- Children Page -->
-                <div class="page" id="childrenPage" style="display: none;">
+                <div class="page" id="childrenPage" hidden>
                     <div class="page-header">
                         <div class="search-box">
                             <i class="fas fa-search"></i>
-                            <input type="text" id="childSearch" placeholder="Search children...">
+                            <input type="text" id="childSearch" placeholder="Search children..." data-i18n-placeholder="search.children">
                         </div>
                     </div>
                     <div class="card">
-                        <div class="card-body">
+                        <div class="card-body p-0">
                             <div class="table-responsive">
                                 <table class="data-table">
                                     <thead>
                                         <tr>
-                                            <th>Name</th>
-                                            <th>Age</th>
-                                            <th>Parent</th>
-                                            <th>Parent Phone</th>
+                                            <th data-i18n="table.name">Name</th>
+                                            <th data-i18n="table.age">Age</th>
+                                            <th data-i18n="table.parent">Parent</th>
+                                            <th data-i18n="table.parentPhone">Parent Phone</th>
                                         </tr>
                                     </thead>
-                                    <tbody id="childrenTable">
-                                        <!-- Populated by JavaScript -->
-                                    </tbody>
+                                    <tbody id="childrenTable"></tbody>
                                 </table>
                             </div>
                         </div>
@@ -284,47 +346,94 @@
                 </div>
 
                 <!-- Settings Page -->
-                <div class="page" id="settingsPage" style="display: none;">
-                    <div class="card">
-                        <div class="card-header">
-                            <h2>General Settings</h2>
+                <div class="page" id="settingsPage" hidden>
+                    <div class="content-grid">
+                        <div class="card">
+                            <div class="card-header">
+                                <h2 data-i18n="settings.general">General</h2>
+                            </div>
+                            <div class="card-body">
+                                <div class="settings-section">
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label data-i18n="settings.autoApprove">Auto-approve Drivers</label>
+                                            <p data-i18n="settings.autoApproveDesc">Automatically approve new driver registrations</p>
+                                        </div>
+                                        <label class="toggle-switch">
+                                            <input type="checkbox" id="autoApprove">
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="setting-item">
+                                        <div class="setting-info">
+                                            <label data-i18n="settings.emailNotifications">Email Notifications</label>
+                                            <p data-i18n="settings.emailNotificationsDesc">Receive email notifications for important events</p>
+                                        </div>
+                                        <label class="toggle-switch">
+                                            <input type="checkbox" id="emailNotifications" checked>
+                                            <span class="slider"></span>
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
-                        <div class="card-body">
-                            <div class="settings-section">
-                                <h3>System Settings</h3>
-                                <div class="setting-item">
-                                    <div class="setting-info">
-                                        <label>Auto-approve Drivers</label>
-                                        <p>Automatically approve new driver registrations</p>
-                                    </div>
-                                    <label class="toggle-switch">
-                                        <input type="checkbox" id="autoApprove">
-                                        <span class="slider"></span>
+
+                        <div class="card">
+                            <div class="card-header">
+                                <h2 data-i18n="settings.dispatch">Dispatch Algorithm</h2>
+                                <span class="text-sm text-muted" data-i18n="settings.dispatchHint">Weights for candidate scoring</span>
+                            </div>
+                            <div class="card-body">
+                                <div class="form-group">
+                                    <label>
+                                        <span data-i18n="settings.wDistance">Distance</span>
+                                        <span class="text-muted text-sm" id="wDistanceVal">40%</span>
                                     </label>
+                                    <input type="range" id="wDistance" min="0" max="100" value="40">
                                 </div>
-                                <div class="setting-item">
-                                    <div class="setting-info">
-                                        <label>Email Notifications</label>
-                                        <p>Receive email notifications for important events</p>
-                                    </div>
-                                    <label class="toggle-switch">
-                                        <input type="checkbox" id="emailNotifications" checked>
-                                        <span class="slider"></span>
+                                <div class="form-group">
+                                    <label>
+                                        <span data-i18n="settings.wLocality">Same baladia / wilaya</span>
+                                        <span class="text-muted text-sm" id="wLocalityVal">20%</span>
                                     </label>
+                                    <input type="range" id="wLocality" min="0" max="100" value="20">
                                 </div>
+                                <div class="form-group">
+                                    <label>
+                                        <span data-i18n="settings.wRating">Driver rating / history</span>
+                                        <span class="text-muted text-sm" id="wRatingVal">15%</span>
+                                    </label>
+                                    <input type="range" id="wRating" min="0" max="100" value="15">
+                                </div>
+                                <div class="form-group">
+                                    <label>
+                                        <span data-i18n="settings.wFreshness">Location freshness</span>
+                                        <span class="text-muted text-sm" id="wFreshnessVal">10%</span>
+                                    </label>
+                                    <input type="range" id="wFreshness" min="0" max="100" value="10">
+                                </div>
+                                <div class="form-group">
+                                    <label>
+                                        <span data-i18n="settings.wWorkload">Workload balance</span>
+                                        <span class="text-muted text-sm" id="wWorkloadVal">15%</span>
+                                    </label>
+                                    <input type="range" id="wWorkload" min="0" max="100" value="15">
+                                </div>
+                                <p class="text-sm text-muted" data-i18n="settings.dispatchNote">Saved locally in your browser.</p>
                             </div>
                         </div>
                     </div>
                 </div>
+
             </div>
         </main>
     </div>
 
-    <!-- Assign driver to ride (closest to pickup first) -->
-    <div class="modal" id="assignDriverModal">
-        <div class="modal-content modal-wide">
+    <!-- Assign driver modal -->
+    <div class="modal" id="assignDriverModal" role="dialog" aria-modal="true" aria-labelledby="assignModalTitle">
+        <div class="modal-content modal-xl">
             <div class="modal-header">
-                <h2>Assign driver</h2>
+                <h2 id="assignModalTitle" data-i18n="assign.title">Assign driver</h2>
                 <button type="button" class="modal-close" id="closeAssignModal" aria-label="Close">
                     <i class="fas fa-times"></i>
                 </button>
@@ -333,76 +442,92 @@
                 <p class="assign-ride-meta" id="assignRideMeta"></p>
                 <label class="assign-modify-toggle" id="assignModifyWrap" hidden>
                     <input type="checkbox" id="assignAllowModify">
-                    Enable modifying driver for this trip
+                    <span data-i18n="assign.enableModify">Enable modifying driver for this trip</span>
                 </label>
-                <div id="assignDriverList" class="assign-driver-list"></div>
+                <div class="assign-layout">
+                    <div id="assignMap" class="assign-map" aria-label="Pickup map"></div>
+                    <div id="assignDriverList" class="assign-driver-list"></div>
+                </div>
             </div>
         </div>
     </div>
 
-    <!-- Modal for Driver Details -->
-    <div class="modal" id="driverModal">
-        <div class="modal-content">
+    <!-- Driver Detail Modal -->
+    <div class="modal" id="driverModal" role="dialog" aria-modal="true" aria-labelledby="driverModalTitle">
+        <div class="modal-content modal-wide">
             <div class="modal-header">
-                <h2>Driver Details</h2>
-                <button class="modal-close" id="closeModal">
+                <h2 id="driverModalTitle" data-i18n="driver.details">Driver Details</h2>
+                <button type="button" class="modal-close" id="closeModal" aria-label="Close">
                     <i class="fas fa-times"></i>
                 </button>
             </div>
-            <div class="modal-body" id="driverModalBody">
-                <!-- Populated by JavaScript -->
-            </div>
+            <div class="modal-body" id="driverModalBody"></div>
         </div>
     </div>
 
     <!-- Login Modal -->
-    <div class="modal" id="loginModal">
+    <div class="modal" id="loginModal" role="dialog" aria-modal="true" aria-labelledby="loginModalTitle">
         <div class="modal-content modal-login">
             <div class="modal-header">
-                <h2>Admin Login</h2>
+                <h2 id="loginModalTitle" data-i18n="auth.adminLogin">Admin Login</h2>
                 <button type="button" class="modal-close" id="closeLoginModal" aria-label="Close">
                     <i class="fas fa-times"></i>
                 </button>
             </div>
             <div class="modal-body">
                 <div class="login-tabs">
-                    <button class="login-tab active" id="emailTabBtn" data-tab="email">Email & Password</button>
-                    <button class="login-tab" id="googleTabBtn" data-tab="google">Google Sign-In</button>
+                    <button type="button" class="login-tab active" id="emailTabBtn" data-tab="email" data-i18n="auth.emailPassword">Email &amp; Password</button>
+                    <button type="button" class="login-tab" id="googleTabBtn" data-tab="google" data-i18n="auth.google">Google Sign-In</button>
                 </div>
 
-                <!-- Email & Password Tab -->
                 <div class="login-tab-content active" id="emailTabContent">
                     <form id="emailLoginForm">
                         <div class="form-group">
-                            <label for="loginEmail">Email:</label>
-                            <input type="email" id="loginEmail" required placeholder="Enter your email">
+                            <label for="loginEmail" data-i18n="auth.email">Email</label>
+                            <input type="email" id="loginEmail" required placeholder="you@example.com">
                         </div>
                         <div class="form-group">
-                            <label for="loginPassword">Password:</label>
-                            <input type="password" id="loginPassword" required placeholder="Enter your password">
+                            <label for="loginPassword" data-i18n="auth.password">Password</label>
+                            <input type="password" id="loginPassword" required placeholder="••••••••">
                         </div>
-                        <button type="submit" class="btn btn-primary" id="emailSubmitBtn">Sign In</button>
-                        <p class="login-help-text">Don't have an account? Contact your administrator.</p>
+                        <button type="submit" class="btn btn-primary btn-block btn-lg" id="emailSubmitBtn" data-i18n="auth.signIn">Sign In</button>
+                        <p class="login-help-text" data-i18n="auth.contactAdmin">Don't have an account? Contact your administrator.</p>
                     </form>
                 </div>
 
-                <!-- Google Sign-In Tab -->
                 <div class="login-tab-content" id="googleTabContent">
-                    <button type="button" class="btn btn-google" id="googleLoginBtn">
-                        <i class="fab fa-google"></i> Sign in with Google
+                    <button type="button" class="btn btn-google btn-block btn-lg" id="googleLoginBtn">
+                        <i class="fab fa-google"></i>
+                        <span data-i18n="auth.signInGoogle">Sign in with Google</span>
                     </button>
-                    <p class="login-help-text">Click above to sign in with your Google account.</p>
+                    <p class="login-help-text" data-i18n="auth.googleHint">Click above to sign in with your Google account.</p>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Firebase (compat) SDKs - replace with your preferred version if needed -->
+    <!-- Toasts + live banner -->
+    <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
+    <div id="liveBanner" class="live-banner" hidden>
+        <span data-i18n="live.streaming">Live data</span>
+    </div>
+
+    <!-- Leaflet -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""></script>
+
+    <!-- Firebase (compat) SDKs -->
     <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-auth-compat.js"></script>
     <script src="firebase-config.js"></script>
+
+    <!-- App -->
     <script src="driver-normalize.js"></script>
+    <script src="i18n.js"></script>
+    <script src="dispatcher.js"></script>
+    <script src="fleet-map.js"></script>
     <script src="script.js"></script>
 </body>
 </html>
