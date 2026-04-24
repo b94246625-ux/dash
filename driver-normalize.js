@@ -1,7 +1,10 @@
 /**
- * Map Firestore `drivers/{docId}` → dashboard / rapport shape.
+ * Map Firestore `drivers/{docId}` → dashboard / report shape.
+ * Exposes: window.normalizeDriverFromFirestore(docId, data)
  */
 (function () {
+    'use strict';
+
     function toIsoString(value) {
         if (value == null || value === '') return '';
         if (typeof value.toDate === 'function') {
@@ -22,8 +25,17 @@
         if (typeof w !== 'object') return { display: '', code: '', name: '' };
         const name = w.name != null ? String(w.name).trim() : '';
         const code = w.code != null ? String(w.code).trim() : '';
-        let display = (name && code) ? `${name} (${code})` : (name || code);
+        const display = (name && code) ? `${name} (${code})` : (name || code);
         return { display, code, name };
+    }
+
+    function parseBaladia(b) {
+        if (b == null || b === '') return { display: '', id: '', name: '' };
+        if (typeof b === 'string') { const s = b.trim(); return { display: s, id: '', name: s }; }
+        if (typeof b !== 'object') return { display: '', id: '', name: '' };
+        const name = b.name != null ? String(b.name).trim() : '';
+        const id = b.id != null ? String(b.id).trim() : '';
+        return { display: name || id, id, name };
     }
 
     function deriveDriverStatus(data) {
@@ -60,15 +72,9 @@
     }
 
     window.normalizeDriverFromFirestore = function normalizeDriverFromFirestore(docId, data) {
-        console.log('🚨 NORMALIZE CALLED with data:', data);
         data = data || {};
         const kyc = data.kyc && typeof data.kyc === 'object' ? data.kyc : {};
-        
-        // Debug kyc
-        console.log('🔍 kyc object AFTER extraction:', kyc);
-        console.log('🔍 kyc.vehicle value:', kyc.vehicle);
-        console.log('🔍 typeof kyc:', typeof kyc);
-        console.log('🔍 kyc === object?:', kyc && typeof kyc === 'object');
+
         const rootLicense =
             data.license && typeof data.license === 'object' ? data.license :
             data.drivingLicense && typeof data.drivingLicense === 'object' ? data.drivingLicense : {};
@@ -76,21 +82,12 @@
             kyc.license && typeof kyc.license === 'object' ? kyc.license :
             kyc.licence && typeof kyc.licence === 'object' ? kyc.licence : {};
         const greyCard = kyc.greyCard && typeof kyc.greyCard === 'object' ? kyc.greyCard : {};
+        const judicialRecord = kyc.judicialRecord && typeof kyc.judicialRecord === 'object' ? kyc.judicialRecord : {};
+        const medicalCert = kyc.medicalCert && typeof kyc.medicalCert === 'object' ? kyc.medicalCert : {};
 
-        // ✅ vehicle يقرأ من kyc.vehicle أو data.vehicle
-        console.log('🔎 PRE-VEHICLE EXTRACTION:');
-        console.log('  kyc:', kyc);
-        console.log('  kyc.vehicle:', kyc.vehicle);
-        console.log('  kyc.vehicle && typeof kyc.vehicle === "object":', kyc.vehicle && typeof kyc.vehicle === 'object');
-        console.log('  data.vehicle:', data.vehicle);
-        
-        const vehicle = (kyc.vehicle && typeof kyc.vehicle === 'object') ? kyc.vehicle : 
-                       (data.vehicle && typeof data.vehicle === 'object') ? data.vehicle : {};
-        
-        console.log('💯 VEHICLE EXTRACTED:', vehicle);
-        console.log('💯 Vehicle keys:', Object.keys(vehicle));
-        console.log('💯 Vehicle.brand:', vehicle.brand);
-        console.log('💯 Vehicle.model:', vehicle.model);
+        const vehicle =
+            (kyc.vehicle && typeof kyc.vehicle === 'object') ? kyc.vehicle :
+            (data.vehicle && typeof data.vehicle === 'object') ? data.vehicle : {};
 
         const startLocation =
             data.startLocation && typeof data.startLocation === 'object' ? data.startLocation :
@@ -99,23 +96,13 @@
         const currentLocation = data.currentLocation && typeof data.currentLocation === 'object' ? data.currentLocation : {};
         const imgs = pickLicenseImages(data, kyc, rootLicense, kycLicense);
         const wilayaParts = parseWilaya(data.wilaya);
+        const baladiaParts = parseBaladia(data.baladia);
 
         const profilePhotoUrl =
             data.facePhotoUrl || data.profilePhotoUrl || data.photoUrl ||
             data.avatarUrl || data.profileImageUrl || kyc.selfieUrl || '';
 
-        // ✅ Debug: طباعة vehicle قبل النورملايز
-        console.log('🚗 Raw vehicle from Firestore:', vehicle);
-        console.log('🔍 Full data keys:', Object.keys(data));
-        
-        console.log('🎯 BUILDING VEHICLE FIELDS:');
-        console.log('  vehicle.brand:', vehicle.brand, '→ vehicleMake:', vehicle.brand || vehicle.make || data.vehicleMake || '');
-        console.log('  vehicle.model:', vehicle.model, '→ vehicleModel:', vehicle.model || data.vehicleModel || '');
-        console.log('  vehicle.plateNumber:', vehicle.plateNumber, '→ vehiclePlate:', vehicle.plateNumber || vehicle.plate || vehicle.registrationPlate || vehicle.registrationNumber || data.vehiclePlate || data.plate || '');
-        console.log('  vehicle.year:', vehicle.year, '→ vehicleYear:', vehicle.year != null ? String(vehicle.year) : data.vehicleYear != null ? String(data.vehicleYear) : '');
-        console.log('  vehicle.color:', vehicle.color, '→ vehicleColor:', vehicle.color || data.vehicleColor || '');
-
-        const result = {
+        return {
             __docId: docId,
             id: docId,
             name: data.fullName || [data.firstName, data.lastName].filter(Boolean).join(' ') || data.name || 'Unknown',
@@ -127,8 +114,10 @@
             status: deriveDriverStatus(data),
             isApproved: data.isApproved === true,
             isAvailable: data.isAvailable === true,
-            availableSeats: Number.isFinite(Number(data.availableSeats)) ? Number(data.availableSeats) : null,
             isOnline: data.isOnline === true,
+            canReceiveTrips: data.canReceiveTrips !== false,
+            availableSeats: Number.isFinite(Number(data.availableSeats)) ? Number(data.availableSeats) : null,
+            capacity: Number.isFinite(Number(data.capacity)) ? Number(data.capacity) : null,
             profileComplete: data.profileComplete === true,
             role: data.role || '',
             bloodType: data.bloodType || '',
@@ -139,6 +128,9 @@
             wilaya: wilayaParts.display || data.province || data.region || '',
             wilayaCode: wilayaParts.code,
             wilayaName: wilayaParts.name,
+            baladia: baladiaParts.display,
+            baladiaId: baladiaParts.id,
+            baladiaName: baladiaParts.name,
             address: data.address || data.streetAddress || '',
             nationalId: data.nationalId || data.nin || data.nationalID || '',
             dateOfBirth: toIsoString(data.dateOfBirth || data.dob) || '',
@@ -155,8 +147,15 @@
             greyCardPhotoUrl: greyCard.photo || '',
             greyCardRegistration: greyCard.registrationNumber || '',
             greyCardVerified: greyCard.verified === true,
+            judicialRecordPhotoUrl: judicialRecord.photo || '',
+            judicialRecordVerified: judicialRecord.verified === true,
+            judicialRecordIssueDate: judicialRecord.issueDate || '',
+            medicalCertPhotoUrl: medicalCert.photo || '',
+            medicalCertDoctor: medicalCert.doctorName || '',
+            medicalCertIssueDate: medicalCert.issueDate || '',
+            medicalCertExpiryDate: medicalCert.expiryDate || '',
+            medicalCertVerified: medicalCert.verified === true,
 
-            // ✅ vehicle fields - يقرأ من vehicle.brand, vehicle.model إلخ
             vehicleMake:  vehicle.brand || vehicle.make || data.vehicleMake || '',
             vehicleModel: vehicle.model || data.vehicleModel || '',
             vehiclePlate:
@@ -172,6 +171,7 @@
             kycNotes:
                 kyc.reviewNotes || kyc.review_notes || kyc.notes ||
                 kyc.rejectionReason || kyc.comment || '',
+
             startLocation,
             locationLat: numOrNull(
                 startLocation.lat ?? startLocation.latitude ?? startLocation._lat ??
@@ -194,18 +194,14 @@
                 toIsoString(startLocation.updatedAt) ||
                 toIsoString(location.locationUpdatedAt) ||
                 toIsoString(currentLocation.locationUpdatedAt) ||
-                toIsoString(data.locationUpdatedAt) || ''
+                toIsoString(data.startLocationUpdatedAt) ||
+                toIsoString(data.locationUpdatedAt) || '',
+            startLocationUpdatedAt:
+                toIsoString(data.startLocationUpdatedAt) ||
+                toIsoString(startLocation.updatedAt) || '',
+            completedTrips: Number.isFinite(Number(data.completedTrips)) ? Number(data.completedTrips) : null,
+            cancelledTrips: Number.isFinite(Number(data.cancelledTrips)) ? Number(data.cancelledTrips) : null,
+            rating: Number.isFinite(Number(data.rating)) ? Number(data.rating) : null,
         };
-
-        // ✅ Debug: طباعة النتيجة النهائية للـ vehicle
-        console.log('✅ Normalized vehicle:', {
-            vehicleMake:  result.vehicleMake,
-            vehicleModel: result.vehicleModel,
-            vehiclePlate: result.vehiclePlate,
-            vehicleYear:  result.vehicleYear,
-            vehicleColor: result.vehicleColor,
-        });
-
-        return result;
     };
 })();
